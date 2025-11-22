@@ -1,0 +1,40 @@
+{
+  "name": "paraloom-wallet",
+  "displayName": "Paraloom Wallet",
+  "version": "0.1.0",
+  "description": "Privacy-focused wallet extension for Paraloom",
+  "scripts": {
+    "dev": "plasmo dev",
+    "build": "plasmo build",
+    "package": "plasmo package"
+  },
+  "dependencies": {
+    "@noble/ed25519": "^2.1.0",
+    "@noble/hashes": "^1.5.0",
+    "bip39": "^3.1.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "tweetnacl": "^1.0.3",
+    "zustand": "^5.0.2"
+  },
+  "devDependencies": {
+    "@ianvs/prettier-plugin-sort-imports": "4.3.1",
+    "@types/bip39": "^3.0.0",
+    "@types/chrome": "0.0.278",
+    "@types/node": "22.10.2",
+    "@types/react": "18.3.18",
+    "@types/react-dom": "18.3.5",
+    "plasmo": "0.89.4",
+    "prettier": "3.4.2",
+    "typescript": "5.7.2"
+  },
+  "manifest": {
+    "host_permissions": [
+      "https://*/*"
+    ],
+    "permissions": [
+      "storage",
+      "activeTab"
+    ]
+  }
+}
