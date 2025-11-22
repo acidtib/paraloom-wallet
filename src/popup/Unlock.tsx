@@ -1,7 +1,12 @@
 import { useState } from "react"
-import { decryptWallet } from "~lib/crypto/keyManagement"
+import {
+  decryptWallet,
+  decryptSeedPhrase,
+  deriveKeypairFromSeed
+} from "~lib/crypto/keyManagement"
 import { getStoredWallet, setLockState } from "~lib/storage/secure"
 import { useWalletStore } from "~lib/store/walletStore"
+import type { Account } from "~lib/store/walletStore"
 
 import logoImg from "data-base64:~/../paraloom.png"
 
@@ -13,7 +18,7 @@ export function Unlock({ onUnlock }: UnlockProps) {
   const [password, setPassword] = useState("")
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
-  const { unlock } = useWalletStore()
+  const { unlock, setSeedPhrase, addAccount } = useWalletStore()
 
   async function handleUnlock() {
     setError("")
@@ -28,7 +33,40 @@ export function Unlock({ onUnlock }: UnlockProps) {
       }
 
       const wallet = decryptWallet(stored.encryptedData, password)
-      unlock(wallet)
+
+      // Restore seed phrase if available
+      let seedPhrase: string | undefined
+      if (stored.encryptedSeedPhrase) {
+        try {
+          seedPhrase = decryptSeedPhrase(stored.encryptedSeedPhrase, password)
+          console.log("Seed phrase restored successfully")
+        } catch (err) {
+          console.error("Failed to decrypt seed phrase:", err)
+        }
+      } else {
+        console.warn("No encrypted seed phrase found in storage")
+      }
+
+      // Restore accounts if available
+      if (stored.accounts && stored.accounts.length > 0 && seedPhrase) {
+        console.log(`Restoring ${stored.accounts.length} accounts...`)
+        for (const storedAccount of stored.accounts) {
+          const keypair = deriveKeypairFromSeed(seedPhrase, storedAccount.index)
+          const account: Account = {
+            index: storedAccount.index,
+            name: storedAccount.name,
+            keypair,
+            balance: BigInt(storedAccount.balance)
+          }
+          addAccount(account)
+        }
+        console.log("Accounts restored successfully")
+      } else {
+        console.warn("No accounts to restore or seed phrase missing")
+      }
+
+      unlock(wallet, seedPhrase)
+      console.log("Seed phrase in store after unlock:", seedPhrase ? "available" : "missing")
       await setLockState(false)
 
       chrome.runtime.sendMessage({ type: "ACTIVITY" })

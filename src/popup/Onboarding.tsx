@@ -7,6 +7,7 @@ import {
 } from "~lib/crypto/keyManagement"
 import { saveEncryptedWallet, setLockState } from "~lib/storage/secure"
 import { useWalletStore } from "~lib/store/walletStore"
+import type { Account } from "~lib/store/walletStore"
 
 import logoImg from "data-base64:~/../paraloom.png"
 
@@ -23,7 +24,7 @@ export function Onboarding({ onComplete }: OnboardingProps) {
   const [confirmPassword, setConfirmPassword] = useState("")
   const [error, setError] = useState("")
   const [loading, setLoading] = useState(false)
-  const { unlock } = useWalletStore()
+  const { unlock, addAccount, setSeedPhrase: setSeedPhraseStore } = useWalletStore()
 
   function handleCreateWallet() {
     try {
@@ -61,13 +62,34 @@ export function Onboarding({ onComplete }: OnboardingProps) {
 
     try {
       console.log("Deriving keypair...")
-      const keypair = deriveKeypairFromSeed(seedPhrase)
+      const keypair = deriveKeypairFromSeed(seedPhrase, 0)
+
+      // Create initial account
+      const initialAccount: Account = {
+        index: 0,
+        name: "Account 1",
+        keypair,
+        balance: 0n
+      }
+
       console.log("Encrypting wallet...")
       const encrypted = encryptWallet(keypair, password)
       console.log("Saving to storage...")
-      await saveEncryptedWallet(encrypted, keypair.shieldedAddress)
+      await saveEncryptedWallet(
+        encrypted,
+        keypair.shieldedAddress,
+        seedPhrase,
+        password,
+        [initialAccount]
+      )
+
       console.log("Unlocking wallet...")
-      unlock(keypair)
+      unlock(keypair, seedPhrase)
+
+      // Save seed phrase and account to store
+      setSeedPhraseStore(seedPhrase)
+      addAccount(initialAccount)
+
       await setLockState(false)
       console.log("Wallet created successfully!")
 
@@ -103,10 +125,31 @@ export function Onboarding({ onComplete }: OnboardingProps) {
     setLoading(true)
 
     try {
-      const keypair = deriveKeypairFromSeed(seedPhrase)
+      const keypair = deriveKeypairFromSeed(seedPhrase, 0)
+
+      // Create initial account
+      const initialAccount: Account = {
+        index: 0,
+        name: "Account 1",
+        keypair,
+        balance: 0n
+      }
+
       const encrypted = encryptWallet(keypair, password)
-      await saveEncryptedWallet(encrypted, keypair.shieldedAddress)
-      unlock(keypair)
+      await saveEncryptedWallet(
+        encrypted,
+        keypair.shieldedAddress,
+        seedPhrase,
+        password,
+        [initialAccount]
+      )
+
+      unlock(keypair, seedPhrase)
+
+      // Save seed phrase and account to store
+      setSeedPhraseStore(seedPhrase)
+      addAccount(initialAccount)
+
       await setLockState(false)
       onComplete()
     } catch (err) {

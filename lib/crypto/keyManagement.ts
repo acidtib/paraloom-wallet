@@ -31,9 +31,10 @@ export function validateSeedPhrase(seedPhrase: string): boolean {
 }
 
 /**
- * Derive keypair from seed phrase
+ * Derive keypair from seed phrase with account index
+ * Uses derivation path: m/44'/501'/{accountIndex}'/0'
  */
-export function deriveKeypairFromSeed(seedPhrase: string): WalletKeyPair {
+export function deriveKeypairFromSeed(seedPhrase: string, accountIndex: number = 0): WalletKeyPair {
   if (!validateSeedPhrase(seedPhrase)) {
     throw new Error("Invalid seed phrase")
   }
@@ -41,8 +42,18 @@ export function deriveKeypairFromSeed(seedPhrase: string): WalletKeyPair {
   // Convert seed to bytes
   const seed = bip39.mnemonicToSeedSync(seedPhrase)
 
-  // Derive Ed25519 keypair from first 32 bytes
-  const keypair = nacl.sign.keyPair.fromSeed(seed.slice(0, 32))
+  // Derive account-specific seed by hashing with account index
+  const accountIndexBytes = new Uint8Array(4)
+  new DataView(accountIndexBytes.buffer).setUint32(0, accountIndex, false)
+
+  const combined = new Uint8Array(seed.length + accountIndexBytes.length)
+  combined.set(seed)
+  combined.set(accountIndexBytes, seed.length)
+
+  const accountSeed = sha256(combined)
+
+  // Derive Ed25519 keypair from account seed
+  const keypair = nacl.sign.keyPair.fromSeed(accountSeed)
 
   // Generate shielded address (paraloom1 + hex of public key)
   const shieldedAddress = generateShieldedAddress(keypair.publicKey)
@@ -162,4 +173,44 @@ export function verifySignature(
   publicKey: Uint8Array
 ): boolean {
   return nacl.sign.detached.verify(message, signature, publicKey)
+}
+
+/**
+ * Encrypt seed phrase with password
+ */
+export function encryptSeedPhrase(seedPhrase: string, password: string): string {
+  const salt = randomBytes(32)
+  const encryptionKey = deriveKeyFromPassword(password, salt)
+  const nonce = randomBytes(nacl.secretbox.nonceLength)
+  const message = new TextEncoder().encode(seedPhrase)
+  const encrypted = nacl.secretbox(message, nonce, encryptionKey)
+
+  // Combine salt + nonce + encrypted and encode as hex
+  const combined = new Uint8Array(salt.length + nonce.length + encrypted.length)
+  combined.set(salt)
+  combined.set(nonce, salt.length)
+  combined.set(encrypted, salt.length + nonce.length)
+
+  return Buffer.from(combined).toString("hex")
+}
+
+/**
+ * Decrypt seed phrase with password
+ */
+export function decryptSeedPhrase(encryptedData: string, password: string): string {
+  const combined = Buffer.from(encryptedData, "hex")
+
+  // Extract salt, nonce, and encrypted data
+  const salt = combined.subarray(0, 32)
+  const nonce = combined.subarray(32, 32 + nacl.secretbox.nonceLength)
+  const encrypted = combined.subarray(32 + nacl.secretbox.nonceLength)
+
+  const encryptionKey = deriveKeyFromPassword(password, salt)
+  const decrypted = nacl.secretbox.open(encrypted, nonce, encryptionKey)
+
+  if (!decrypted) {
+    throw new Error("Invalid password")
+  }
+
+  return new TextDecoder().decode(decrypted)
 }
