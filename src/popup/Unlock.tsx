@@ -8,7 +8,7 @@ import { getStoredWallet, setLockState } from "~lib/storage/secure"
 import { useWalletStore } from "~lib/store/walletStore"
 import type { Account } from "~lib/store/walletStore"
 
-import logoImg from "data-base64:~/../paraloom.png"
+import logoImg from "data-base64:~/../assets/icon.png"
 
 interface UnlockProps {
   onUnlock: () => void

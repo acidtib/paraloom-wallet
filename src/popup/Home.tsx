@@ -3,8 +3,9 @@ import { setLockState, updateAccounts } from "~lib/storage/secure"
 import { useWalletStore } from "~lib/store/walletStore"
 import { deriveKeypairFromSeed } from "~lib/crypto/keyManagement"
 import type { Account } from "~lib/store/walletStore"
+import { QRCodeSVG } from "qrcode.react"
 
-import logoImg from "data-base64:~/../paraloom.png"
+import logoImg from "data-base64:~/../assets/icon.png"
 
 interface Token {
   symbol: string
@@ -442,6 +443,133 @@ export function Home({ onLock }: HomeProps) {
           <div className="nav-label">Activity</div>
         </button>
       </div>
+
+      {/* Receive Modal */}
+      {showReceiveModal && (
+        <div className="modal-overlay" onClick={() => setShowReceiveModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Receive PARA</h3>
+              <button className="modal-close" onClick={() => setShowReceiveModal(false)}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            </div>
+
+            <div className="qr-container">
+              <div className="qr-code-wrapper">
+                <QRCodeSVG
+                  value={wallet.shieldedAddress}
+                  size={200}
+                  bgColor="#13131A"
+                  fgColor="#D4AF37"
+                  level="H"
+                  includeMargin={true}
+                  imageSettings={{
+                    src: logoImg,
+                    x: undefined,
+                    y: undefined,
+                    height: 40,
+                    width: 40,
+                    excavate: true,
+                  }}
+                />
+              </div>
+              <div className="receive-info">
+                <p className="receive-label">Your Address</p>
+                <div className="address-display">
+                  <code className="address-text">{wallet.shieldedAddress}</code>
+                </div>
+                <button
+                  className="button copy-button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(wallet.shieldedAddress)
+                    setCopied(true)
+                    setTimeout(() => setCopied(false), 2000)
+                  }}
+                >
+                  {copied ? (
+                    <>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <polyline points="20 6 9 17 4 12"></polyline>
+                      </svg>
+                      Copied!
+                    </>
+                  ) : (
+                    <>
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect>
+                        <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path>
+                      </svg>
+                      Copy Address
+                    </>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Send Modal */}
+      {showSendModal && (
+        <div className="modal-overlay" onClick={() => setShowSendModal(false)}>
+          <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Send PARA</h3>
+              <button className="modal-close" onClick={() => setShowSendModal(false)}>
+                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <line x1="18" y1="6" x2="6" y2="18"></line>
+                  <line x1="6" y1="6" x2="18" y2="18"></line>
+                </svg>
+              </button>
+            </div>
+
+            <div className="send-form">
+              <div className="form-group">
+                <label className="form-label">Recipient Address</label>
+                <input
+                  type="text"
+                  className="form-input"
+                  placeholder="paraloom1..."
+                  value={recipient}
+                  onChange={(e) => setRecipient(e.target.value)}
+                />
+              </div>
+
+              <div className="form-group">
+                <label className="form-label">Amount</label>
+                <div className="amount-input-wrapper">
+                  <input
+                    type="number"
+                    className="form-input amount-input"
+                    placeholder="0.0000"
+                    value={amount}
+                    onChange={(e) => setAmount(e.target.value)}
+                  />
+                  <div className="input-suffix">PARA</div>
+                  <button
+                    type="button"
+                    className="max-button"
+                    onClick={() => setAmount(formatBalance(balance, 9))}
+                  >
+                    Max
+                  </button>
+                </div>
+                <div className="balance-info">
+                  Available: {formatBalance(balance, 9)} PARA
+                </div>
+              </div>
+
+              <button className="button send-button" disabled={!recipient || !amount}>
+                Send
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
