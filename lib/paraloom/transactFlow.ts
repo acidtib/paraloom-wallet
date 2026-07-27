@@ -1,0 +1,254 @@
+// Circuit v3 (#350): wallet orchestration for deposit_note and the unified
+// transact spend. One spend flow covers withdraw (ext_amount < 0) and shielded
+// transfer (ext_amount == 0, value moves between output notes); partial spends
+// return change to the wallet as a new note — the audit #16 fix.
+
+import { Connection, Keypair } from "@solana/web3.js"
+
+import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
+import { proveTransact, v3MerklePath, v3NoteCommitment, v3NotePubkey } from "~lib/prover"
+
+import { NATIVE_ASSET_HEX } from "~lib/prover"
+import { encryptNote } from "./noteCrypto"
+import { addNote, markNoteSpent, type ShieldedNote } from "./notes"
+import { fetchV3Leaves, sendDepositNote, submitTransact } from "./transact"
+
+function randomHex32(): string {
+  const b = new Uint8Array(32)
+  crypto.getRandomValues(b)
+  b[31] &= 0x1f // stay well under the BN254 modulus
+  return Buffer.from(b).toString("hex")
+}
+
+/// Deposit lamports as a v3 note: the program computes the commitment and
+/// appends it on-chain; the leaf index comes back in the DepositNoteEvent.
+export async function depositV3(
+  connection: Connection,
+  wallet: { secretKey: Uint8Array },
+  shieldedAddress: string,
+  spendPrivkeyHex: string,
+  lamports: bigint
+): Promise<{ signature: string; leafIndex: number }> {
+  const blindingHex = randomHex32()
+  const pubkeyHex = await v3NotePubkey(spendPrivkeyHex)
+  const payer = Keypair.fromSecretKey(wallet.secretKey)
+
+  const signature = await sendDepositNote(
+    connection,
+    payer,
+    lamports,
+    Uint8Array.from(Buffer.from(pubkeyHex, "hex")),
+    Uint8Array.from(Buffer.from(blindingHex, "hex"))
+  )
+
+  // Read our leaf index from the event this deposit emitted.
+  const tx = await connection.getTransaction(signature, {
+    maxSupportedTransactionVersion: 0
+  })
+  let leafIndex = -1
+  for (const line of tx?.meta?.logMessages ?? []) {
+    const m = line.match(/^Program log: Deposit note appended at leaf (\d+)$/)
+    if (m) leafIndex = Number(m[1])
+  }
+  if (leafIndex < 0) {
+    // Fallback: locate our commitment in the rebuilt leaf list.
+    const commitment = await v3NoteCommitment(lamports, pubkeyHex, blindingHex)
+    const leaves = await fetchV3Leaves(connection)
+    leafIndex = leaves.findIndex((l) => l.commitmentHex === commitment)
+  }
+  if (leafIndex < 0) {
+    throw new Error("deposit confirmed but leaf index not found")
+  }
+
+  await addNote(shieldedAddress, {
+    amount: lamports.toString(),
+    blinding: blindingHex,
+    assetId: NATIVE_ASSET_HEX,
+    signature,
+    createdAt: Date.now(),
+    spent: false,
+    source: "deposit",
+    leafIndex
+  })
+  return { signature, leafIndex }
+}
+
+/// Locate a note's leaf index by its commitment (for received notes that were
+/// scanned from ciphertexts and carry no index).
+async function ensureLeafIndex(
+  connection: Connection,
+  note: ShieldedNote,
+  spendPrivkeyHex: string
+): Promise<number> {
+  if (note.leafIndex !== undefined && note.leafIndex >= 0) return note.leafIndex
+  const pubkeyHex = await v3NotePubkey(spendPrivkeyHex)
+  const commitment = await v3NoteCommitment(BigInt(note.amount), pubkeyHex, note.blinding)
+  const leaves = await fetchV3Leaves(connection)
+  const idx = leaves.findIndex((l) => l.commitmentHex === commitment)
+  if (idx < 0) throw new Error("note commitment not found in the on-chain tree")
+  return idx
+}
+
+export interface SpendResult {
+  requestId: string
+  /// Change returned to the wallet, if any (recorded as a new local note).
+  changeLamports: bigint
+}
+
+/// Spend 1–2 notes through the unified transact:
+///  - `recipientSolanaHex` set → withdraw `payLamports` to that Solana address
+///    (`ext_amount = -payLamports`), change stays shielded.
+///  - `recipientShielded` set → shielded transfer: `payLamports` moves to the
+///    recipient's note, change back to us, no external flow (`ext_amount = 0`).
+export async function spendV3(
+  connection: Connection,
+  shieldedAddress: string,
+  spendPrivkeyHex: string,
+  ownBoxPubHex: string,
+  inputs: ShieldedNote[],
+  payLamports: bigint,
+  dest:
+    | { kind: "withdraw"; recipientSolanaHex: string }
+    | { kind: "transfer"; recipientShielded: string },
+  ingressToken?: string
+): Promise<SpendResult> {
+  if (inputs.length < 1 || inputs.length > 2) {
+    throw new Error("transact spends 1 or 2 notes")
+  }
+  const sumIn = inputs.reduce((acc, n) => acc + BigInt(n.amount), 0n)
+  if (payLamports <= 0n || payLamports > sumIn) {
+    throw new Error("amount exceeds the selected notes")
+  }
+  const change = sumIn - payLamports
+
+  // Membership paths from the client-side tree rebuild — the root every path
+  // folds to is the root the proof cites.
+  const leaves = await fetchV3Leaves(connection)
+  const leavesHex = leaves.map((l) => l.commitmentHex)
+  const inputSpecs = [] as {
+    amount: bigint
+    privkeyHex: string
+    blindingHex: string
+    leafIndex: number
+    pathHex: string[]
+  }[]
+  let rootHex = ""
+  for (const note of inputs) {
+    const leafIndex = await ensureLeafIndex(connection, note, spendPrivkeyHex)
+    const { path, root } = await v3MerklePath(leavesHex, leafIndex)
+    rootHex = root
+    inputSpecs.push({
+      amount: BigInt(note.amount),
+      privkeyHex: spendPrivkeyHex,
+      blindingHex: note.blinding,
+      leafIndex,
+      pathHex: path
+    })
+  }
+  // Pad a single-note spend with a zero-value dummy (membership is skipped
+  // in-circuit for zero notes; the path just needs the right shape).
+  if (inputSpecs.length === 1) {
+    const { path } = await v3MerklePath(leavesHex, inputSpecs[0].leafIndex)
+    inputSpecs.push({
+      amount: 0n,
+      privkeyHex: randomHex32(),
+      blindingHex: randomHex32(),
+      leafIndex: 0,
+      pathHex: path
+    })
+  }
+
+  // Outputs: for a withdraw both outputs stay ours (change + zero filler);
+  // for a transfer the payment note goes to the recipient's v3 spend pubkey.
+  const ownPubHex = await v3NotePubkey(spendPrivkeyHex)
+  const changeBlind = randomHex32()
+  const fillerBlind = randomHex32()
+
+  let extAmount: bigint
+  let recipientHex: string
+  let outputs: { amount: bigint; pubkeyHex: string; blindingHex: string }[]
+  let ciphertexts: [string, string]
+
+  if (dest.kind === "withdraw") {
+    extAmount = -payLamports
+    recipientHex = dest.recipientSolanaHex
+    outputs = [
+      { amount: change, pubkeyHex: ownPubHex, blindingHex: changeBlind },
+      { amount: 0n, pubkeyHex: ownPubHex, blindingHex: fillerBlind }
+    ]
+    ciphertexts = [
+      encryptNote(ownBoxPubHex, {
+        amount: change,
+        blindingHex: changeBlind,
+        assetIdHex: NATIVE_ASSET_HEX
+      }),
+      encryptNote(ownBoxPubHex, {
+        amount: 0n,
+        blindingHex: fillerBlind,
+        assetIdHex: NATIVE_ASSET_HEX
+      })
+    ]
+  } else {
+    extAmount = 0n
+    recipientHex = "00".repeat(32)
+    const toSpendPub = addressSpendPubHex(dest.recipientShielded)
+    const toBoxPub = addressBoxPubHex(dest.recipientShielded)
+    const payBlind = randomHex32()
+    outputs = [
+      { amount: payLamports, pubkeyHex: toSpendPub, blindingHex: payBlind },
+      { amount: change, pubkeyHex: ownPubHex, blindingHex: changeBlind }
+    ]
+    ciphertexts = [
+      encryptNote(toBoxPub, {
+        amount: payLamports,
+        blindingHex: payBlind,
+        assetIdHex: NATIVE_ASSET_HEX
+      }),
+      encryptNote(ownBoxPubHex, {
+        amount: change,
+        blindingHex: changeBlind,
+        assetIdHex: NATIVE_ASSET_HEX
+      })
+    ]
+  }
+
+  const bundle = await proveTransact(
+    rootHex,
+    extAmount,
+    recipientHex,
+    [inputSpecs[0], inputSpecs[1]] as never,
+    [outputs[0], outputs[1]] as never
+  )
+
+  const { requestId } = await submitTransact(
+    rootHex,
+    extAmount,
+    recipientHex,
+    bundle,
+    ciphertexts,
+    ingressToken
+  )
+
+  // Mark inputs spent and record the change note locally. Its leaf index is
+  // the next slot after the current tree tip (outputs append in order).
+  for (const note of inputs) {
+    await markNoteSpent(shieldedAddress, note.signature)
+  }
+  if (change > 0n) {
+    const changeLeaf =
+      dest.kind === "withdraw" ? leaves.length : leaves.length + 1
+    await addNote(shieldedAddress, {
+      amount: change.toString(),
+      blinding: changeBlind,
+      assetId: NATIVE_ASSET_HEX,
+      signature: "",
+      createdAt: Date.now(),
+      spent: false,
+      source: "transfer",
+      commitment: await v3NoteCommitment(change, ownPubHex, changeBlind),
+      leafIndex: changeLeaf
+    })
+  }
+
+  return { requestId, changeLamports: change }
+}
