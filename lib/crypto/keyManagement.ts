@@ -1,12 +1,85 @@
 import * as bip39 from "bip39"
 import { sha256 } from "@noble/hashes/sha256"
+import { scrypt } from "@noble/hashes/scrypt"
 import { randomBytes } from "@noble/hashes/utils"
 import * as nacl from "tweetnacl"
+
+// Circuit v3 (#350): the address carries the circom-Poseidon spend pubkey the
+// v3 note commitments bind to. Addresses derived before the v3 cutover used
+// the old sponge Poseidon and died with the pool reset.
+import { v3NotePubkey as deriveSpendPub } from "~lib/prover"
+
+// scrypt parameters for password-based key derivation.
+// N=2^15 / r=8 / p=1 → ~100ms in-popup, 32 MiB memory-hard work factor.
+// Memory-hardness is what makes this resist the GPU/ASIC brute-force that
+// the old plain-SHA-256 chain was wide open to.
+const SCRYPT_PARAMS = { N: 2 ** 15, r: 8, p: 1, dkLen: 32 } as const
+
+// KDF version stored alongside the wallet so old vaults stay decryptable.
+// 1 = scrypt (current). Absence / undefined = legacy SHA-256 chain.
+export const KDF_VERSION_SCRYPT = 1
 
 export interface WalletKeyPair {
   publicKey: Uint8Array
   secretKey: Uint8Array
   shieldedAddress: string
+  // X25519 box keypair for encrypted note delivery (#196). Derived from the
+  // ed25519 secret (its first 32 bytes are the account seed), so it is not
+  // stored in the vault — it is reconstructed on every unlock.
+  boxPublicKey: Uint8Array
+  boxSecretKey: Uint8Array
+  // Spend private key for circuit v2 (#293): binds note commitments and signs
+  // nullifiers. Derived from the account seed, reconstructed on every unlock.
+  spendPrivkey: Uint8Array
+}
+
+/**
+ * Derive the X25519 (NaCl box) keypair from an ed25519 secret key. The first
+ * 32 bytes of a tweetnacl sign secret key are the account seed; box keys are
+ * derived from it so the seed phrase alone recovers everything (#196).
+ */
+export function deriveBoxKeypair(ed25519SecretKey: Uint8Array): nacl.BoxKeyPair {
+  return nacl.box.keyPair.fromSecretKey(ed25519SecretKey.slice(0, 32))
+}
+
+/**
+ * Derive the circuit-v2 spend private key from an ed25519 secret key, domain-
+ * separated so it is independent of the sign and box keys (#293). The first 32
+ * bytes of the sign secret key are the account seed, so the seed phrase alone
+ * recovers it.
+ */
+export function deriveSpendPrivkey(ed25519SecretKey: Uint8Array): Uint8Array {
+  const accountSeed = ed25519SecretKey.slice(0, 32)
+  const tag = new TextEncoder().encode("paraloom-spend-v2")
+  const input = new Uint8Array(tag.length + accountSeed.length)
+  input.set(tag)
+  input.set(accountSeed, tag.length)
+  return sha256(input)
+}
+
+/**
+ * The v2 shielded address (#293), `paraloom1<boxPub(64hex)><spendPub(64hex)>`:
+ * the box public key for encrypted note delivery and the spend public key a
+ * sender binds an output note to. Async because the spend pubkey is a Poseidon
+ * hash computed in the wasm prover.
+ */
+export async function deriveShieldedAddress(
+  boxPublicKey: Uint8Array,
+  spendPrivkey: Uint8Array
+): Promise<string> {
+  const boxHex = Buffer.from(boxPublicKey).toString("hex")
+  const spendHex = await deriveSpendPub(Buffer.from(spendPrivkey).toString("hex"))
+  return `paraloom1${boxHex}${spendHex}`
+}
+
+/** The box (encryption) public key half of a v2 shielded address, hex. */
+export function addressBoxPubHex(shieldedAddress: string): string {
+  return shieldedAddress.replace(/^paraloom1/, "").slice(0, 64)
+}
+
+/** The spend (commitment-binding) public key half of a v2 shielded address, hex. */
+export function addressSpendPubHex(shieldedAddress: string): string {
+  return shieldedAddress.replace(/^paraloom1/, "").slice(64, 128)
 }
 
 export interface EncryptedWallet {
@@ -34,7 +107,10 @@ export function validateSeedPhrase(seedPhrase: string): boolean {
  * Derive keypair from seed phrase with account index
  * Uses derivation path: m/44'/501'/{accountIndex}'/0'
  */
-export function deriveKeypairFromSeed(seedPhrase: string, accountIndex: number = 0): WalletKeyPair {
+export async function deriveKeypairFromSeed(
+  seedPhrase: string,
+  accountIndex: number = 0
+): Promise<WalletKeyPair> {
   if (!validateSeedPhrase(seedPhrase)) {
     throw new Error("Invalid seed phrase")
   }
@@ -55,30 +131,36 @@ export function deriveKeypairFromSeed(seedPhrase: string, accountIndex: number =
   // Derive Ed25519 keypair from account seed
   const keypair = nacl.sign.keyPair.fromSeed(accountSeed)
 
-  // Generate shielded address (paraloom1 + hex of public key)
-  const shieldedAddress = generateShieldedAddress(keypair.publicKey)
+  // X25519 box keypair (encrypted note delivery, #196) + spend keypair (v2
+  // commitment binding, #293). The shielded address carries both pubkeys.
+  const box = deriveBoxKeypair(keypair.secretKey)
+  const spendPrivkey = deriveSpendPrivkey(keypair.secretKey)
+  const shieldedAddress = await deriveShieldedAddress(box.publicKey, spendPrivkey)
 
   return {
     publicKey: keypair.publicKey,
     secretKey: keypair.secretKey,
-    shieldedAddress
+    shieldedAddress,
+    boxPublicKey: box.publicKey,
+    boxSecretKey: box.secretKey,
+    spendPrivkey
   }
 }
 
 /**
- * Generate paraloom1... address from public key
+ * Derive encryption key from password using scrypt (memory-hard).
+ * Used for all newly written vaults.
  */
-export function generateShieldedAddress(publicKey: Uint8Array): string {
-  const hash = sha256(publicKey)
-  const hex = Buffer.from(hash).toString("hex")
-  return `paraloom1${hex}`
+function deriveKeyScrypt(password: string, salt: Uint8Array): Uint8Array {
+  return scrypt(new TextEncoder().encode(password), salt, SCRYPT_PARAMS)
 }
 
 /**
- * Derive encryption key from password using PBKDF2
+ * Legacy key derivation: a plain iterated-SHA-256 chain (NOT real PBKDF2).
+ * GPU-parallelizable and weak — retained ONLY to decrypt vaults written
+ * before the scrypt migration. Never use this to encrypt new data.
  */
-function deriveKeyFromPassword(password: string, salt: Uint8Array): Uint8Array {
-  // Simple PBKDF2 using SHA-256 (100k iterations)
+function deriveKeyLegacy(password: string, salt: Uint8Array): Uint8Array {
   let key = new TextEncoder().encode(password)
 
   for (let i = 0; i < 100000; i++) {
@@ -92,7 +174,16 @@ function deriveKeyFromPassword(password: string, salt: Uint8Array): Uint8Array {
 }
 
 /**
- * Encrypt wallet with password (AES-256-GCM via TweetNaCl secretbox)
+ * Select the KDF for a given vault version.
+ * legacy=true → old SHA-256 chain; otherwise scrypt.
+ */
+function deriveKey(password: string, salt: Uint8Array, legacy: boolean): Uint8Array {
+  return legacy ? deriveKeyLegacy(password, salt) : deriveKeyScrypt(password, salt)
+}
+
+/**
+ * Encrypt wallet with password.
+ * Key derivation: scrypt. Cipher: NaCl secretbox (XSalsa20-Poly1305).
  */
 export function encryptWallet(
   keypair: WalletKeyPair,
@@ -101,8 +192,8 @@ export function encryptWallet(
   // Generate random salt
   const salt = randomBytes(32)
 
-  // Derive encryption key from password
-  const encryptionKey = deriveKeyFromPassword(password, salt)
+  // Derive encryption key from password (scrypt)
+  const encryptionKey = deriveKeyScrypt(password, salt)
 
   // Generate random nonce
   const nonce = randomBytes(nacl.secretbox.nonceLength)
@@ -128,17 +219,18 @@ export function encryptWallet(
 /**
  * Decrypt wallet with password
  */
-export function decryptWallet(
+export async function decryptWallet(
   encryptedWallet: EncryptedWallet,
-  password: string
-): WalletKeyPair {
+  password: string,
+  legacy: boolean = false
+): Promise<WalletKeyPair> {
   // Parse hex strings
   const encrypted = Buffer.from(encryptedWallet.encrypted, "hex")
   const nonce = Buffer.from(encryptedWallet.nonce, "hex")
   const salt = Buffer.from(encryptedWallet.salt, "hex")
 
-  // Derive encryption key from password
-  const encryptionKey = deriveKeyFromPassword(password, salt)
+  // Derive encryption key from password (scrypt, or legacy chain for old vaults)
+  const encryptionKey = deriveKey(password, salt, legacy)
 
   // Decrypt
   const decrypted = nacl.secretbox.open(encrypted, nonce, encryptionKey)
@@ -150,10 +242,21 @@ export function decryptWallet(
   // Parse wallet data
   const walletData = JSON.parse(new TextDecoder().decode(decrypted))
 
+  // Derive the box keypair from the stored ed25519 secret and recompute the
+  // shielded address from the box public key (#196). This overrides any
+  // address stored by a pre-#196 vault (which used sha256(pubkey)), migrating
+  // existing wallets to the box-pubkey address with no re-onboarding.
+  const secretKey = Buffer.from(walletData.secretKey, "hex")
+  const box = deriveBoxKeypair(secretKey)
+  const spendPrivkey = deriveSpendPrivkey(secretKey)
+
   return {
     publicKey: Buffer.from(walletData.publicKey, "hex"),
-    secretKey: Buffer.from(walletData.secretKey, "hex"),
-    shieldedAddress: walletData.shieldedAddress
+    secretKey,
+    shieldedAddress: await deriveShieldedAddress(box.publicKey, spendPrivkey),
+    boxPublicKey: box.publicKey,
+    boxSecretKey: box.secretKey,
+    spendPrivkey
   }
 }
 
@@ -180,7 +283,7 @@ export function verifySignature(
  */
 export function encryptSeedPhrase(seedPhrase: string, password: string): string {
   const salt = randomBytes(32)
-  const encryptionKey = deriveKeyFromPassword(password, salt)
+  const encryptionKey = deriveKeyScrypt(password, salt)
   const nonce = randomBytes(nacl.secretbox.nonceLength)
   const message = new TextEncoder().encode(seedPhrase)
   const encrypted = nacl.secretbox(message, nonce, encryptionKey)
@@ -197,7 +300,11 @@ export function encryptSeedPhrase(seedPhrase: string, password: string): string 
 /**
  * Decrypt seed phrase with password
  */
-export function decryptSeedPhrase(encryptedData: string, password: string): string {
+export function decryptSeedPhrase(
+  encryptedData: string,
+  password: string,
+  legacy: boolean = false
+): string {
   const combined = Buffer.from(encryptedData, "hex")
 
   // Extract salt, nonce, and encrypted data
@@ -205,7 +312,7 @@ export function decryptSeedPhrase(encryptedData: string, password: string): stri
   const nonce = combined.subarray(32, 32 + nacl.secretbox.nonceLength)
   const encrypted = combined.subarray(32 + nacl.secretbox.nonceLength)
 
-  const encryptionKey = deriveKeyFromPassword(password, salt)
+  const encryptionKey = deriveKey(password, salt, legacy)
   const decrypted = nacl.secretbox.open(encrypted, nonce, encryptionKey)
 
   if (!decrypted) {

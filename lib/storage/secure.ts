@@ -1,5 +1,5 @@
 import type { EncryptedWallet } from "~lib/crypto/keyManagement"
-import { encryptSeedPhrase } from "~lib/crypto/keyManagement"
+import { encryptSeedPhrase, KDF_VERSION_SCRYPT } from "~lib/crypto/keyManagement"
 import type { Account } from "~lib/store/walletStore"
 
 export interface SerializableAccount {
@@ -15,12 +15,16 @@ export interface StoredWallet {
   createdAt: number
   encryptedSeedPhrase?: string
   accounts?: SerializableAccount[]
+  // KDF used for encryptedData + encryptedSeedPhrase. Both blobs are always
+  // written together, so one marker covers both. Absent = legacy SHA-256 chain.
+  kdfVersion?: number
 }
 
 export interface WalletStorage {
   wallet?: StoredWallet
   locked: boolean
   autoLockMinutes: number
+  network?: "mainnet-beta" | "devnet"
 }
 
 const STORAGE_KEY = "paraloom_wallet"
@@ -35,7 +39,8 @@ export async function saveEncryptedWallet(
   const data: StoredWallet = {
     encryptedData: encryptedWallet,
     address,
-    createdAt: Date.now()
+    createdAt: Date.now(),
+    kdfVersion: KDF_VERSION_SCRYPT
   }
 
   // Encrypt and save seed phrase if provided
@@ -60,6 +65,30 @@ export async function saveEncryptedWallet(
       autoLockMinutes: 15
     }
   })
+}
+
+/**
+ * Re-encrypt an already-unlocked wallet under the current (scrypt) KDF,
+ * updating only the wallet blobs + kdfVersion and preserving every other
+ * stored setting (lock state, auto-lock minutes, network).
+ * Used to transparently upgrade legacy vaults on first unlock.
+ */
+export async function migrateWalletToScrypt(
+  encryptedWallet: EncryptedWallet,
+  seedPhrase: string | undefined,
+  password: string
+): Promise<void> {
+  const result = await chrome.storage.local.get(STORAGE_KEY)
+  const storage = result[STORAGE_KEY] as WalletStorage | undefined
+  if (!storage?.wallet) return
+
+  storage.wallet.encryptedData = encryptedWallet
+  storage.wallet.kdfVersion = KDF_VERSION_SCRYPT
+  if (seedPhrase) {
+    storage.wallet.encryptedSeedPhrase = encryptSeedPhrase(seedPhrase, password)
+  }
+
+  await chrome.storage.local.set({ [STORAGE_KEY]: storage })
 }
 
 export async function getStoredWallet(): Promise<StoredWallet | null> {
@@ -115,6 +144,21 @@ export async function updateAccounts(accounts: Account[]): Promise<void> {
       address: acc.keypair.shieldedAddress,
       balance: acc.balance.toString()
     }))
+    await chrome.storage.local.set({ [STORAGE_KEY]: storage })
+  }
+}
+
+export async function getNetwork(): Promise<"mainnet-beta" | "devnet"> {
+  // Mainnet is locked pre-launch, so devnet is the only selectable network.
+  return "devnet"
+}
+
+export async function setNetwork(network: "mainnet-beta" | "devnet"): Promise<void> {
+  const result = await chrome.storage.local.get(STORAGE_KEY)
+  const storage = result[STORAGE_KEY] as WalletStorage
+
+  if (storage) {
+    storage.network = network
     await chrome.storage.local.set({ [STORAGE_KEY]: storage })
   }
 }
