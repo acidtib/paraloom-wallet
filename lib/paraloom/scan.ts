@@ -1,9 +1,9 @@
-// Recipient discovery (#196): poll the node's /transfer/scan endpoint, trial-
+// Recipient discovery (#196): poll the node's /transact/scan endpoint, trial-
 // decrypt every delivered ciphertext with this wallet's box secret, and store
 // the notes that decrypt as spendable. Failed decrypts are silent. Shielded
 // balance then reflects received transfer notes, not just local deposits.
 
-import { TRANSFER_INGRESS_URL } from "./constants"
+import { TRANSACT_INGRESS_URL } from "./constants"
 import { tryDecryptNote } from "./noteCrypto"
 import { addDiscoveredNote, getNotes } from "./notes"
 
@@ -16,7 +16,7 @@ interface DeliveredNote {
 // were discovered. The note is spent later with the account's own spend key
 // (#293), so no per-note secret is stored.
 export async function scanForNotes(account: string, boxSecretKey: Uint8Array): Promise<number> {
-  const res = await fetch(`${TRANSFER_INGRESS_URL}/transfer/scan`)
+  const res = await fetch(`${TRANSACT_INGRESS_URL}/transact/scan`)
   if (!res.ok) {
     throw new Error(`Scan failed (${res.status})`)
   }

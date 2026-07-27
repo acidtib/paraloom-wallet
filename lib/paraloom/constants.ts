@@ -33,7 +33,7 @@ export const LAMPORTS_PER_SOL = 1_000_000_000n
 // services by path). One host; the path picks the service.
 //   /merkle/path/:commitment   read-only Merkle path (withdrawal/transfer proofs)
 //   /withdrawal/submit         withdrawal ingress
-//   /transfer/submit, /scan    transfer ingress + recipient discovery (#194/#196)
+//   /transact/submit, /transact/scan   transact ingress + recipient discovery
 export const PATH_SERVER_URL = "https://node.paraloom.io"
 export const INGRESS_URL = "https://node.paraloom.io"
 export const TRANSFER_INGRESS_URL = "https://node.paraloom.io"
