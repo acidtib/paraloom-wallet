@@ -1,16 +1,17 @@
 {
   "name": "paraloom-wallet",
   "displayName": "Paraloom Wallet",
-  "version": "0.1.0",
-  "description": "Privacy-focused wallet extension for Paraloom",
+  "version": "1.3.1",
+  "description": "Privacy-focused wallet for Paraloom Network. Create shielded wallets, manage accounts, and connect to dApps.",
   "scripts": {
     "dev": "plasmo dev",
-    "build": "plasmo build",
-    "package": "plasmo package"
+    "build": "plasmo build && node scripts/patch-manifest.mjs",
+    "package": "plasmo build && node scripts/patch-manifest.mjs && cd build/chrome-mv3-prod && zip -r -FS ../paraloom-wallet.zip . -x '*.map'"
   },
   "dependencies": {
     "@noble/ed25519": "^2.1.0",
     "@noble/hashes": "^1.5.0",
+    "@solana/web3.js": "^1.98.4",
     "bip39": "^3.1.0",
     "qrcode.react": "^4.2.0",
     "react": "18.3.1",
@@ -30,12 +31,15 @@
     "typescript": "5.7.2"
   },
   "manifest": {
-    "host_permissions": [
-      "https://*/*"
-    ],
     "permissions": [
-      "storage",
-      "activeTab"
-    ]
+      "storage"
+    ],
+    "host_permissions": [
+      "https://node.paraloom.io/*",
+      "https://api.devnet.solana.com/*"
+    ],
+    "content_security_policy": {
+      "extension_pages": "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'"
+    }
   }
 }
