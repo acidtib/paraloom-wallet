@@ -33,3 +33,17 @@ pnpm-debug.log*
 *.md
 
 ex/
+
+# Proving keys. Public parameters, not secrets — but 34 MB of binary that
+# would be permanent history, and a committed key is a key that can go stale
+# without anyone noticing. v1.3.0 shipped the ceremony's *initial* key that
+# way. They are build inputs: copy the current ones in at build time.
+lib/prover/*.key
+
+# Compiled wasm from paraloom-prover-wasm. Same reasoning: build output that
+# can go stale without anyone noticing, and the source is public now, so it is
+# built and copied in rather than carried here.
+lib/prover/*.wasm
+
+# TypeScript incremental build state.
+tsconfig.tsbuildinfo
