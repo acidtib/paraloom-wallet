@@ -1,16 +1,24 @@
 import { useEffect, useState } from "react"
 import { createRoot } from "react-dom/client"
 import { getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
+import { loadSession } from "~lib/storage/session"
+import { useWalletStore } from "~lib/store/walletStore"
+import { ConnectApprove } from "~src/popup/ConnectApprove"
 import { Home } from "~src/popup/Home"
 import { Onboarding } from "~src/popup/Onboarding"
 import { Unlock } from "~src/popup/Unlock"
 
 import "./style.css"
 
+function sendMessage(message: Record<string, unknown>): Promise<unknown> {
+  return new Promise((resolve) => chrome.runtime.sendMessage(message, resolve))
+}
+
 function Popup() {
   const [hasWallet, setHasWallet] = useState(false)
   const [locked, setLocked] = useState(true)
   const [loading, setLoading] = useState(true)
+  const [pending, setPending] = useState<{ id: number; origin: string } | null>(null)
 
   useEffect(() => {
     initWallet()
@@ -19,13 +27,24 @@ function Popup() {
   async function initWallet() {
     const wallet = await getStoredWallet()
 
-    // Auto-lock on extension open for security (but not on first load)
+    // Stay unlocked across popup opens (Phantom-style) for as long as the idle
+    // auto-lock timer allows. The decrypted session lives in memory-only
+    // storage.session; restore it so Home has the keys it needs. If it's gone
+    // (browser was closed, or auto-lock fired and cleared it), require a re-unlock.
     if (wallet) {
       const isLocked = await isWalletLocked()
-      // Only auto-lock if wallet exists and is already unlocked
-      // This ensures security when extension is reopened
       if (!isLocked) {
-        await setLockState(true)
+        const session = await loadSession()
+        if (session) {
+          const store = useWalletStore.getState()
+          store.unlock(session.wallet, session.seedPhrase ?? undefined)
+          session.accounts.forEach((a) => store.addAccount(a))
+          if (session.currentAccountIndex) {
+            store.switchAccount(session.currentAccountIndex)
+          }
+        } else {
+          await setLockState(true)
+        }
       }
     }
 
@@ -36,7 +55,19 @@ function Popup() {
     const wallet = await getStoredWallet()
     const isLocked = await isWalletLocked()
 
+    // Resolve any pending dapp connection request BEFORE flipping state, so the
+    // first unlocked render already carries it — otherwise Home flashes for one
+    // frame between unlock and the pending lookup. (A connection request is only
+    // actionable once unlocked.)
+    let p: { id: number; origin: string } | null = null
+    if (wallet && !isLocked) {
+      p = (await sendMessage({ type: "GET_PENDING_CONNECTION" })) as
+        | { id: number; origin: string }
+        | null
+    }
+
     setHasWallet(!!wallet)
+    setPending(p)
     setLocked(isLocked)
     setLoading(false)
   }
@@ -60,7 +91,19 @@ function Popup() {
   if (locked) {
     return (
       <div className="app">
-        <Unlock onUnlock={() => setLocked(false)} />
+        <Unlock onUnlock={() => checkWalletState()} />
+      </div>
+    )
+  }
+
+  if (pending) {
+    return (
+      <div className="app">
+        <ConnectApprove
+          id={pending.id}
+          origin={pending.origin}
+          onResolved={() => setPending(null)}
+        />
       </div>
     )
   }
