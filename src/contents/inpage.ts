@@ -1,0 +1,87 @@
+import type { PlasmoCSConfig } from "plasmo"
+
+const DEV_MATCHES =
+  process.env.NODE_ENV === "development"
+    ? ["http://localhost/*", "http://127.0.0.1/*"]
+    : []
+
+// Runs in the page's MAIN world so the dapp can see `window.paraloom`. A
+// MAIN-world content script is injected by the browser itself (not via a
+// <script> tag), so unlike an inline injection it is NOT subject to the page's
+// CSP — which is what blocked the previous approach on app.paraloom.io. It has
+// no chrome.* access, so every call is relayed to the isolated relay.ts over
+// window.postMessage.
+//
+// NOTE: Plasmo 0.89.4 builds this file but drops the world:"MAIN" entry from the
+// generated manifest, so scripts/patch-manifest.mjs re-adds it after the build.
+export const config: PlasmoCSConfig = {
+  matches: ["https://*.paraloom.io/*", "https://paraloom.io/*", ...DEV_MATCHES],
+  run_at: "document_start",
+  world: "MAIN"
+}
+
+const REQ = "paraloom:request"
+const RES = "paraloom:response"
+
+let counter = 0
+
+function relay(type: string, payload?: Record<string, unknown>): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const id = ++counter
+    const onMessage = (event: MessageEvent) => {
+      if (event.source !== window) return
+      const data = event.data
+      if (!data || data.channel !== RES || data.id !== id) return
+      window.removeEventListener("message", onMessage)
+      if (data.error) reject(new Error(data.error))
+      else resolve(data.result)
+    }
+    window.addEventListener("message", onMessage)
+    window.postMessage({ channel: REQ, id, type, payload }, window.location.origin)
+  })
+}
+
+if (!(window as any).paraloom) {
+  ;(window as any).paraloom = {
+    connect: async () => {
+      const r = await relay("CONNECT_WALLET")
+      if (r?.success) return r.data
+      throw new Error(r?.error || "Failed to connect")
+    },
+    disconnect: async () => {
+      await relay("DISCONNECT_WALLET")
+    },
+    signMessage: async (message: string) => {
+      const r = await relay("SIGN_MESSAGE", { message })
+      if (r?.success) return r.signature
+      throw new Error(r?.error || "Failed to sign")
+    },
+    sendPrivateTransfer: async (params: unknown) => {
+      const r = await relay("SEND_PRIVATE_TRANSFER", { params })
+      if (r?.success) return r.txHash
+      throw new Error(r?.error || "Transfer failed")
+    },
+    getAddress: async () => {
+      const r = await relay("GET_ADDRESS")
+      return r?.address ?? null
+    },
+    // The wallet's transparent Solana address (for reading public holdings).
+    getPublicAddress: async () => {
+      const r = await relay("GET_PUBLIC_ADDRESS")
+      return r?.address ?? null
+    },
+    // Shielded SOL balance in lamports, as a decimal string (avoids BigInt
+    // serialization across the message bridge). null if unavailable/locked.
+    getShieldedBalance: async () => {
+      const r = await relay("GET_SHIELDED_BALANCE")
+      return r?.lamports ?? null
+    },
+    isConnected: async () => {
+      const r = await relay("IS_CONNECTED")
+      return r?.connected ?? false
+    }
+  }
+  console.log("[paraloom] wallet bridge ready (main world)")
+}
+
+export {}
