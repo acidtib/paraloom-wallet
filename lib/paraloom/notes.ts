@@ -79,6 +79,23 @@ export async function markNoteSpentByCommitment(account: string, commitment: str
   await writeAll(all)
 }
 
+// Mark exactly the given note spent, by whichever identity is unique to it
+// (#718). Deposit notes carry a non-empty `signature` and no `commitment`;
+// received and change notes carry a `commitment` and an empty `signature`.
+// Matching on `signature` alone flips every empty-signature note at once —
+// received and change notes vanish from the balance and re-scan does not bring
+// them back — so prefer the commitment, and never match on an empty string.
+export async function markNoteSpentByIdentity(account: string, note: ShieldedNote): Promise<void> {
+  if (note.commitment) {
+    await markNoteSpentByCommitment(account, note.commitment)
+  } else if (note.signature) {
+    await markNoteSpent(account, note.signature)
+  }
+  // A note with neither identity cannot be addressed; leaving it is safe (the
+  // on-chain nullifier set is the authoritative double-spend gate) and is not
+  // reachable from the current note-creation paths, which always set one.
+}
+
 // Sum of unspent notes, in lamports.
 export async function shieldedBalance(account: string): Promise<bigint> {
   const notes = await getNotes(account)
