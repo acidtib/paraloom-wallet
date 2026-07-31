@@ -16,10 +16,28 @@ export const config: PlasmoCSConfig = {
 const REQ = "paraloom:request"
 const RES = "paraloom:response"
 
+// The only message types the page provider (`inpage.ts`) ever sends. The relay
+// forwards nothing else, so the popup-only connection-approval types cannot be
+// reached from the page even if this were the only guard. It is not — the
+// background refuses those by sender — but keeping the surface here to exactly
+// the provider API means a new page-reachable type has to be added in two
+// places on purpose, not leaked by the relay passing through whatever it gets.
+const ALLOWED_TYPES = new Set([
+  "CONNECT_WALLET",
+  "DISCONNECT_WALLET",
+  "SIGN_MESSAGE",
+  "SEND_PRIVATE_TRANSFER",
+  "GET_ADDRESS",
+  "GET_PUBLIC_ADDRESS",
+  "GET_SHIELDED_BALANCE",
+  "IS_CONNECTED"
+])
+
 window.addEventListener("message", (event: MessageEvent) => {
   if (event.source !== window) return
   const data = event.data
   if (!data || data.channel !== REQ || typeof data.id !== "number") return
+  if (typeof data.type !== "string" || !ALLOWED_TYPES.has(data.type)) return
 
   const reply = (result?: unknown, error?: string) => {
     window.postMessage({ channel: RES, id: data.id, result, error }, event.origin || "*")

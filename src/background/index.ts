@@ -26,7 +26,40 @@ chrome.runtime.onStartup.addListener(() => {
   startAutoLockTimer()
 })
 
+// Message types the popup UI is the only legitimate sender of. A page relayed
+// through the content script must never reach these: `GET_PENDING_CONNECTION`
+// leaks the id of a connection awaiting approval, and `APPROVE_CONNECTION` /
+// `REJECT_CONNECTION` resolve it — so a page that could send them would read
+// the pending id and approve its own connection, defeating the consent screen
+// entirely.
+//
+// A popup message carries no `sender.tab` (it originates from the extension's
+// own context); a content-script message always carries the tab it came from.
+// That is the distinction, and it needs no extra permission to read.
+const POPUP_ONLY_TYPES = new Set([
+  "ACTIVITY",
+  "GET_WALLET_STATE",
+  "LOCK_WALLET",
+  "GET_PENDING_CONNECTION",
+  "APPROVE_CONNECTION",
+  "REJECT_CONNECTION"
+])
+
+function isFromPopup(sender: chrome.runtime.MessageSender): boolean {
+  // No tab → the extension's own UI. A page relay always has one.
+  return sender.tab === undefined
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Popup-only messages are refused outright when they arrive from a page.
+  // Without this the approval screen is decorative: a script on any injected
+  // origin approves its own connection and reads the visitor's shielded
+  // balance with no interaction.
+  if (POPUP_ONLY_TYPES.has(message.type) && !isFromPopup(sender)) {
+    sendResponse({ success: false, error: "not permitted" })
+    return false
+  }
+
   // Popup messages
   if (message.type === "ACTIVITY") {
     lastActivity = Date.now()
