@@ -10,7 +10,7 @@ import { proveTransact, v3MerklePath, v3NoteCommitment, v3NotePubkey } from "~li
 
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { encryptNote } from "./noteCrypto"
-import { addNote, markNoteSpent, type ShieldedNote } from "./notes"
+import { addNote, markNoteSpentByIdentity, type ShieldedNote } from "./notes"
 import { fetchV3Leaves, sendDepositNote, submitTransact } from "./transact"
 
 function randomHex32(): string {
@@ -232,7 +232,7 @@ export async function spendV3(
   // Mark inputs spent and record the change note locally. Its leaf index is
   // the next slot after the current tree tip (outputs append in order).
   for (const note of inputs) {
-    await markNoteSpent(shieldedAddress, note.signature)
+    await markNoteSpentByIdentity(shieldedAddress, note)
   }
   if (change > 0n) {
     const changeLeaf =

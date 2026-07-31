@@ -127,7 +127,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "GET_ADDRESS") {
-    handleGetAddress().then(sendResponse).catch(() => {
+    handleGetAddress(sender).then(sendResponse).catch(() => {
       sendResponse({ address: null })
     })
     return true
@@ -304,8 +304,13 @@ function waitForUnlock(timeoutMs: number): Promise<boolean> {
   })
 }
 
-async function handleGetAddress() {
-  if (!connectedOrigin) {
+async function handleGetAddress(sender: chrome.runtime.MessageSender) {
+  // Gate on the sender, not just on "some origin is connected" (#719). The
+  // page-facing address getters must match: `handlePublicAddress` and
+  // `handleShieldedBalance` both require `isAuthorizedSender`, and this one
+  // used only `connectedOrigin !== null`, so any injected origin could read
+  // the connected site's shielded address without being approved itself.
+  if (!(await isAuthorizedSender(sender))) {
     return { address: null }
   }
 
