@@ -1,15 +1,49 @@
 import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
-import { clearSession, loadSession } from "~lib/storage/session"
+import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
 import { shieldedBalance } from "~lib/paraloom/notes"
 import { scanForNotes } from "~lib/paraloom/scan"
 import { solanaAddress } from "~lib/paraloom/bridge"
 
-let lockTimer: NodeJS.Timeout | null = null
-let lastActivity = Date.now()
-
 // Connected dApp state (in-memory only)
 let connectedOrigin: string | null = null
+
+// Auto-lock under MV3. The old implementation used a `setInterval` and a
+// module-scope `lastActivity`, armed only from onInstalled/onStartup — all of
+// which die when Chrome terminates the idle service worker (~30s) and respawns
+// it on the next message without re-running that init. The timer never fired,
+// so the wallet, holding the seed phrase and every secret key in session
+// storage, never re-locked. Replaced with a persisted activity timestamp (in
+// session storage, see recordActivity/getLastActivity) plus a chrome.alarms
+// backstop, and an immediate check on every worker spawn so a worker that was
+// dead past the threshold locks the moment it wakes.
+const AUTO_LOCK_ALARM = "paraloom-auto-lock"
+
+async function maybeAutoLock(): Promise<void> {
+  if (await isWalletLocked()) return
+  const last = await getLastActivity()
+  if (last === null) {
+    // Unlocked but no timestamp yet (e.g. a legacy session): start the clock
+    // rather than lock, so we never lock a just-unlocked wallet.
+    await recordActivity(Date.now())
+    return
+  }
+  const minutes = await getAutoLockMinutes()
+  if (Date.now() - last >= minutes * 60 * 1000) {
+    connectedOrigin = null
+    await setLockState(true)
+    await clearSession()
+  }
+}
+
+// Registered at top level so they re-register on every worker spawn. The alarm
+// is the backstop while the worker is alive-but-idle; the immediate call is the
+// backstop for a worker that was terminated past the lock threshold.
+chrome.alarms.create(AUTO_LOCK_ALARM, { periodInMinutes: 1 })
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === AUTO_LOCK_ALARM) void maybeAutoLock()
+})
+void maybeAutoLock()
 
 // A connection request awaiting the user's explicit approval in the popup
 // (Phantom-style). At most one is outstanding at a time.
@@ -18,13 +52,6 @@ let pendingConnection:
   | null = null
 let connectionIdCounter = 0
 
-chrome.runtime.onInstalled.addListener(() => {
-  startAutoLockTimer()
-})
-
-chrome.runtime.onStartup.addListener(() => {
-  startAutoLockTimer()
-})
 
 // Message types the popup UI is the only legitimate sender of. A page relayed
 // through the content script must never reach these: `GET_PENDING_CONNECTION`
@@ -62,7 +89,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
   // Popup messages
   if (message.type === "ACTIVITY") {
-    lastActivity = Date.now()
+    void recordActivity(Date.now())
     sendResponse({ success: true })
     return false
   }
@@ -92,9 +119,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "DISCONNECT_WALLET") {
-    // Revoke the site so it must be approved again next time (Phantom-style).
-    if (connectedOrigin) removeApprovedOrigin(connectedOrigin)
-    connectedOrigin = null
+    // A page may only disconnect ITSELF. Without the sender check any injected
+    // *.paraloom.io page could revoke a different connected origin's approval
+    // and force a surprise re-approval prompt (same #711/#719 shape). Revoke
+    // only when the caller is the connected origin.
+    const origin = senderOrigin(sender)
+    if (origin && connectedOrigin === origin) {
+      removeApprovedOrigin(connectedOrigin)
+      connectedOrigin = null
+    }
     sendResponse({ success: true })
     return false
   }
@@ -134,9 +167,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "IS_CONNECTED") {
-    const connected = connectedOrigin !== null
-    sendResponse({ connected })
-    return false
+    // Per-sender, not the global flag: an unapproved page must not learn that
+    // some other origin has a live connection (a fingerprinting signal).
+    isAuthorizedSender(sender)
+      .then((connected) => sendResponse({ connected }))
+      .catch(() => sendResponse({ connected: false }))
+    return true
   }
 
   if (message.type === "GET_PUBLIC_ADDRESS") {
@@ -154,16 +190,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "SIGN_MESSAGE") {
-    handleSignMessage(message.message).then(sendResponse).catch((err) => {
-      sendResponse({ success: false, error: err.message })
-    })
+    // Gate on the sender, not just "some origin is connected" (the #719 shape).
+    // Both handlers are stubbed today, but this is the sign/spend path — it must
+    // never ride the ambient connection from an unapproved origin once wired.
+    // NOTE before un-stubbing: also add a per-request approval screen showing
+    // the exact message / recipient / amount, so a spend can never happen
+    // without the user seeing it.
+    isAuthorizedSender(sender)
+      .then((ok) => {
+        if (!ok) return sendResponse({ success: false, error: "not authorized" })
+        handleSignMessage(message.message)
+          .then(sendResponse)
+          .catch((err) => sendResponse({ success: false, error: err.message }))
+      })
+      .catch((err) => sendResponse({ success: false, error: err.message }))
     return true
   }
 
   if (message.type === "SEND_PRIVATE_TRANSFER") {
-    handlePrivateTransfer(message.params).then(sendResponse).catch((err) => {
-      sendResponse({ success: false, error: err.message })
-    })
+    isAuthorizedSender(sender)
+      .then((ok) => {
+        if (!ok) return sendResponse({ success: false, error: "not authorized" })
+        handlePrivateTransfer(message.params)
+          .then(sendResponse)
+          .catch((err) => sendResponse({ success: false, error: err.message }))
+      })
+      .catch((err) => sendResponse({ success: false, error: err.message }))
     return true
   }
 
@@ -186,7 +238,7 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
 
   const succeed = () => {
     connectedOrigin = origin
-    lastActivity = Date.now()
+    void recordActivity(Date.now())
     return {
       success: true,
       data: {
@@ -322,11 +374,16 @@ async function handleGetAddress(sender: chrome.runtime.MessageSender) {
 // a previously approved (trusted) site. Resolving against the approved list as
 // well keeps reads working if the MV3 service worker was recycled and lost the
 // in-memory connectedOrigin.
+// The requesting page's origin, resolved without the "tabs" permission. A popup
+// (extension context) has no tab; a content-script relay always does.
+function senderOrigin(sender: chrome.runtime.MessageSender): string | null {
+  return sender.origin ?? (sender.tab?.url ? new URL(sender.tab.url).origin : null)
+}
+
 async function isAuthorizedSender(
   sender: chrome.runtime.MessageSender
 ): Promise<boolean> {
-  const origin =
-    sender.origin ?? (sender.tab?.url ? new URL(sender.tab.url).origin : null)
+  const origin = senderOrigin(sender)
   if (!origin) return false
   if (connectedOrigin === origin) return true
   return isOriginApproved(origin)
@@ -348,7 +405,11 @@ async function handleShieldedBalance(sender: chrome.runtime.MessageSender) {
   // Best-effort refresh from the node; if it fails we still return whatever
   // notes have already been scanned into storage.
   try {
-    await scanForNotes(addr, session.wallet.boxSecretKey)
+    await scanForNotes(
+      addr,
+      session.wallet.boxSecretKey,
+      Buffer.from(session.wallet.spendPrivkey).toString("hex")
+    )
   } catch {}
   const bal = await shieldedBalance(addr)
   return { lamports: bal.toString() }
@@ -368,27 +429,6 @@ async function handlePrivateTransfer(_params: { recipient: string; amount: numbe
   }
 
   throw new Error("Paraloom Network is not yet live. Transfers will be available at mainnet launch.")
-}
-
-async function startAutoLockTimer() {
-  const minutes = await getAutoLockMinutes()
-  const interval = minutes * 60 * 1000
-
-  if (lockTimer) {
-    clearInterval(lockTimer)
-  }
-
-  lockTimer = setInterval(async () => {
-    const locked = await isWalletLocked()
-    if (!locked) {
-      const timeSinceActivity = Date.now() - lastActivity
-      if (timeSinceActivity >= interval) {
-        connectedOrigin = null
-        await setLockState(true)
-        await clearSession()
-      }
-    }
-  }, 30000) // Check every 30s for better accuracy
 }
 
 export {}

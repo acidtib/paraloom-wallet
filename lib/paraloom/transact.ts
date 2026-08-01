@@ -140,10 +140,28 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
   // reversing yields true append order across the whole history.
   for (const sig of [...sigs].reverse()) {
     if (sig.err) continue
-    const tx = await connection.getTransaction(sig.signature, {
-      maxSupportedTransactionVersion: 0
-    })
-    const logs = tx?.meta?.logMessages ?? []
+    // A null getTransaction on a program signature is usually a transient RPC
+    // hiccup, and most program txs carry no leaf at all (cosign, register,
+    // vote, config), so a plain skip of a genuine gap would corrupt the
+    // positional rebuild. Retry a few times first; only if it stays null do we
+    // stop, because we cannot tell a body-pruned leaf tx from a transient miss,
+    // and silently dropping a leaf tx desyncs the tree and freezes spends. The
+    // contiguity check below is the backstop for a dropped leaf; this throw is
+    // the backstop for a dropped trailing leaf the contiguity check can't see.
+    let tx = null
+    for (let attempt = 0; attempt < 3 && !tx; attempt++) {
+      tx = await connection.getTransaction(sig.signature, {
+        maxSupportedTransactionVersion: 0
+      })
+    }
+    if (!tx) {
+      throw new Error(
+        `getTransaction returned null for ${sig.signature} after retries; the ` +
+          `leaf history may be incomplete and the tree cannot be rebuilt safely ` +
+          `(retry, or use an archival RPC if the node prunes history)`
+      )
+    }
+    const logs = tx.meta?.logMessages ?? []
     for (const payload of eventPayloads(logs)) {
       if (startsWith(payload, DEPOSIT_NOTE_EVENT_DISCRIMINATOR)) {
         const body = payload.slice(8)
@@ -163,6 +181,19 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
     }
   }
   leaves.sort((a, b) => a.index - b.index)
+  // The tree is append-only and gap-free: indices must be exactly 0..N-1. The
+  // callers consume this list positionally (v3_merkle_path folds by array
+  // position), so a missing or duplicated index would fold to a wrong root and
+  // freeze spends. Assert it here rather than let it surface as an opaque
+  // "prover root not recognized" later.
+  for (let i = 0; i < leaves.length; i++) {
+    if (leaves[i].index !== i) {
+      throw new Error(
+        `leaf history is not contiguous at position ${i} (saw index ${leaves[i].index}); ` +
+          `refusing to build a tree from an incomplete leaf set`
+      )
+    }
+  }
   return leaves
 }
 

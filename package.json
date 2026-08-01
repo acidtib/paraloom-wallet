@@ -32,7 +32,8 @@
   },
   "manifest": {
     "permissions": [
-      "storage"
+      "storage",
+      "alarms"
     ],
     "host_permissions": [
       "https://node.paraloom.io/*",
