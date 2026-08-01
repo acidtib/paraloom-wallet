@@ -113,11 +113,31 @@ function startsWith(buf: Uint8Array, prefix: Uint8Array): boolean {
 ///   output commitments land at consecutive indices; the first one's index is
 ///   inferred from append order, so leaves are collected then sorted.
 export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
-  const sigs = await connection.getSignaturesForAddress(programId, { limit: 1000 })
+  // Page through the FULL signature history, newest to oldest, following
+  // `before`. `getSignaturesForAddress` caps each call at 1000, so a single
+  // unpaginated fetch only ever saw the newest 1000 — once the program passed
+  // 1000 transactions the wallet rebuilt a tree missing its oldest leaves,
+  // producing a root the on-chain `is_known_root` rejects and freezing every
+  // spend. Walk until a short page signals the end of history.
+  const sigs: Awaited<ReturnType<typeof connection.getSignaturesForAddress>> = []
+  let before: string | undefined
+  for (;;) {
+    const page = await connection.getSignaturesForAddress(programId, {
+      limit: 1000,
+      ...(before ? { before } : {})
+    })
+    if (page.length === 0) break
+    sigs.push(...page)
+    if (page.length < 1000) break
+    before = page[page.length - 1].signature
+  }
+
   const leaves: V3Leaf[] = []
   let transactLeafCursor: number | null = null
 
-  // Oldest first so transact outputs are numbered in append order.
+  // Oldest first so transact outputs are numbered in append order. Each page is
+  // newest-first and pages go newest→oldest, so the full list is newest-first;
+  // reversing yields true append order across the whole history.
   for (const sig of [...sigs].reverse()) {
     if (sig.err) continue
     const tx = await connection.getTransaction(sig.signature, {
