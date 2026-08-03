@@ -44,8 +44,12 @@ window.addEventListener("message", (event: MessageEvent) => {
   }
 
   try {
+    // Pin the allowlisted `type` AFTER spreading the page-controlled payload, so
+    // a `type` key smuggled inside `payload` cannot override the one we just
+    // validated against ALLOWED_TYPES and cross the privilege boundary as a
+    // different message (#736.2).
     chrome.runtime.sendMessage(
-      { type: data.type, ...(data.payload || {}) },
+      { ...(data.payload || {}), type: data.type },
       (response) => {
         const err = chrome.runtime.lastError
         if (err) reply(undefined, err.message)
