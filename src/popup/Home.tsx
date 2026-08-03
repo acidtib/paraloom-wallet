@@ -206,7 +206,11 @@ export function Home({ onLock }: HomeProps) {
     // node is unreachable — the shielded balance still reflects local notes.
     try {
       const boxSecret = deriveBoxKeypair(wallet.secretKey).secretKey
-      await scanForNotes(wallet.shieldedAddress, boxSecret)
+      await scanForNotes(
+        wallet.shieldedAddress,
+        boxSecret,
+        Buffer.from(wallet.spendPrivkey).toString("hex")
+      )
     } catch {
       // transfer node down / no scan endpoint — ignore
     }

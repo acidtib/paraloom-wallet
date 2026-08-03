@@ -229,14 +229,19 @@ export async function spendV3(
     ingressToken
   )
 
-  // Mark inputs spent and record the change note locally. Its leaf index is
-  // the next slot after the current tree tip (outputs append in order).
+  // Mark inputs spent and record the change note locally. Deliberately WITHOUT
+  // a leaf index: the index can only be predicted from a pre-settlement tree
+  // snapshot, and any deposit or transact that lands in the prove+ingress
+  // window shifts the real slot. A wrong index was persisted and then trusted
+  // forever by ensureLeafIndex, so the change output built a membership path to
+  // the wrong slot and became permanently unspendable. Storing only the
+  // commitment forces ensureLeafIndex to locate the note by commitment against
+  // a fresh rebuild at spend time, which is authoritative. (Deposit notes keep
+  // their index because it comes from the on-chain event and never moves.)
   for (const note of inputs) {
     await markNoteSpentByIdentity(shieldedAddress, note)
   }
   if (change > 0n) {
-    const changeLeaf =
-      dest.kind === "withdraw" ? leaves.length : leaves.length + 1
     await addNote(shieldedAddress, {
       amount: change.toString(),
       blinding: changeBlind,
@@ -245,8 +250,7 @@ export async function spendV3(
       createdAt: Date.now(),
       spent: false,
       source: "transfer",
-      commitment: await v3NoteCommitment(change, ownPubHex, changeBlind),
-      leafIndex: changeLeaf
+      commitment: await v3NoteCommitment(change, ownPubHex, changeBlind)
     })
   }
 

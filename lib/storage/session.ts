@@ -9,6 +9,15 @@ import type { Account } from "~lib/store/walletStore"
 // `autoLockMinutes`. Closing the popup no longer drops the unlocked state.
 const SESSION_KEY = "paraloom_session"
 
+// Last-activity timestamp for auto-lock. Kept in chrome.storage.session, not a
+// service-worker module variable: under MV3 the worker is killed after ~30s
+// idle and respawned on the next message without re-running top-level init, so
+// a module var resets to "just now" on every wake and the idle clock never
+// advances. Session storage is memory-only (never on disk, cleared on browser
+// exit) and survives worker restarts within a session, which is exactly the
+// lifetime auto-lock needs.
+const ACTIVITY_KEY = "paraloom_last_activity"
+
 // Portable hex helpers (no Buffer) so this module works in both the popup and
 // the background service worker, where Buffer may be unavailable.
 const toHex = (u: Uint8Array): string =>
@@ -81,7 +90,10 @@ export async function saveSession(session: WalletSession): Promise<void> {
     currentAccountIndex: session.currentAccountIndex,
     seedPhrase: session.seedPhrase
   }
-  await chrome.storage.session.set({ [SESSION_KEY]: ser })
+  // Start the auto-lock clock at unlock. Without this the first idle check
+  // after unlock finds no timestamp; seeding here means the clock always begins
+  // the moment the session exists, whoever created it.
+  await chrome.storage.session.set({ [SESSION_KEY]: ser, [ACTIVITY_KEY]: Date.now() })
 }
 
 export async function loadSession(): Promise<WalletSession | null> {
@@ -102,5 +114,15 @@ export async function loadSession(): Promise<WalletSession | null> {
 }
 
 export async function clearSession(): Promise<void> {
-  await chrome.storage.session.remove(SESSION_KEY)
+  await chrome.storage.session.remove([SESSION_KEY, ACTIVITY_KEY])
+}
+
+export async function recordActivity(now: number): Promise<void> {
+  await chrome.storage.session.set({ [ACTIVITY_KEY]: now })
+}
+
+export async function getLastActivity(): Promise<number | null> {
+  const result = await chrome.storage.session.get(ACTIVITY_KEY)
+  const ts = result[ACTIVITY_KEY]
+  return typeof ts === "number" ? ts : null
 }

@@ -470,7 +470,9 @@ export function Onboarding({ onComplete }: OnboardingProps) {
 
         <div className="onboarding-body">
           <p className="section-description">
-            Enter your 12-word recovery phrase to restore your wallet.
+            Enter your 12-word Paraloom recovery phrase to restore your wallet.
+            Paraloom uses its own key derivation, so a phrase from another wallet
+            (such as Phantom) will restore different accounts.
           </p>
 
           {error && <div className="error">{error}</div>}

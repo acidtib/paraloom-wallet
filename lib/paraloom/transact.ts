@@ -113,17 +113,55 @@ function startsWith(buf: Uint8Array, prefix: Uint8Array): boolean {
 ///   output commitments land at consecutive indices; the first one's index is
 ///   inferred from append order, so leaves are collected then sorted.
 export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
-  const sigs = await connection.getSignaturesForAddress(programId, { limit: 1000 })
+  // Page through the FULL signature history, newest to oldest, following
+  // `before`. `getSignaturesForAddress` caps each call at 1000, so a single
+  // unpaginated fetch only ever saw the newest 1000 — once the program passed
+  // 1000 transactions the wallet rebuilt a tree missing its oldest leaves,
+  // producing a root the on-chain `is_known_root` rejects and freezing every
+  // spend. Walk until a short page signals the end of history.
+  const sigs: Awaited<ReturnType<typeof connection.getSignaturesForAddress>> = []
+  let before: string | undefined
+  for (;;) {
+    const page = await connection.getSignaturesForAddress(programId, {
+      limit: 1000,
+      ...(before ? { before } : {})
+    })
+    if (page.length === 0) break
+    sigs.push(...page)
+    if (page.length < 1000) break
+    before = page[page.length - 1].signature
+  }
+
   const leaves: V3Leaf[] = []
   let transactLeafCursor: number | null = null
 
-  // Oldest first so transact outputs are numbered in append order.
+  // Oldest first so transact outputs are numbered in append order. Each page is
+  // newest-first and pages go newest→oldest, so the full list is newest-first;
+  // reversing yields true append order across the whole history.
   for (const sig of [...sigs].reverse()) {
     if (sig.err) continue
-    const tx = await connection.getTransaction(sig.signature, {
-      maxSupportedTransactionVersion: 0
-    })
-    const logs = tx?.meta?.logMessages ?? []
+    // A null getTransaction on a program signature is usually a transient RPC
+    // hiccup, and most program txs carry no leaf at all (cosign, register,
+    // vote, config), so a plain skip of a genuine gap would corrupt the
+    // positional rebuild. Retry a few times first; only if it stays null do we
+    // stop, because we cannot tell a body-pruned leaf tx from a transient miss,
+    // and silently dropping a leaf tx desyncs the tree and freezes spends. The
+    // contiguity check below is the backstop for a dropped leaf; this throw is
+    // the backstop for a dropped trailing leaf the contiguity check can't see.
+    let tx = null
+    for (let attempt = 0; attempt < 3 && !tx; attempt++) {
+      tx = await connection.getTransaction(sig.signature, {
+        maxSupportedTransactionVersion: 0
+      })
+    }
+    if (!tx) {
+      throw new Error(
+        `getTransaction returned null for ${sig.signature} after retries; the ` +
+          `leaf history may be incomplete and the tree cannot be rebuilt safely ` +
+          `(retry, or use an archival RPC if the node prunes history)`
+      )
+    }
+    const logs = tx.meta?.logMessages ?? []
     for (const payload of eventPayloads(logs)) {
       if (startsWith(payload, DEPOSIT_NOTE_EVENT_DISCRIMINATOR)) {
         const body = payload.slice(8)
@@ -143,6 +181,19 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
     }
   }
   leaves.sort((a, b) => a.index - b.index)
+  // The tree is append-only and gap-free: indices must be exactly 0..N-1. The
+  // callers consume this list positionally (v3_merkle_path folds by array
+  // position), so a missing or duplicated index would fold to a wrong root and
+  // freeze spends. Assert it here rather than let it surface as an opaque
+  // "prover root not recognized" later.
+  for (let i = 0; i < leaves.length; i++) {
+    if (leaves[i].index !== i) {
+      throw new Error(
+        `leaf history is not contiguous at position ${i} (saw index ${leaves[i].index}); ` +
+          `refusing to build a tree from an incomplete leaf set`
+      )
+    }
+  }
   return leaves
 }
 

@@ -8,13 +8,16 @@
 export function note_commitment(amount: bigint, randomness_hex: string, recipient_hex: string): string;
 
 /**
- * Spend-key note commitment (circuit v2, #293), hex.
+ * The v2 note commitment,
+ * `Poseidon(amount, Poseidon(privkey), blinding, asset_id)`.
  *
- * `commitment = Poseidon(amount, Poseidon(privkey), blinding, asset_id)`. Unlike
- * the v1 [`note_commitment`], the note binds the owner's spend *public key*
- * (derived from `privkey`) rather than a recipient address, and an `asset_id`
- * (the mint's 32 bytes; all-zero for native SOL). The wallet stores
- * `(privkey, blinding, asset_id)` and recomputes this on deposit.
+ * Unlike the v1 [`note_commitment`], the note binds the owner's spend *public
+ * key* rather than a recipient address, and an `asset_id` (the mint's 32
+ * bytes; all-zero for native SOL). The wallet stores `(privkey, blinding,
+ * asset_id)` and recomputes this to look up the note's Merkle path.
+ *
+ * Drives the v2 withdraw and transfer flows, so it lives exactly as long as
+ * [`prove_withdrawal_v2`] and [`prove_transfer_v2`] do.
  */
 export function note_commitment_v2(amount: bigint, privkey_hex: string, blinding_hex: string, asset_id_hex: string): string;
 
@@ -38,31 +41,10 @@ export function note_commitment_v2(amount: bigint, privkey_hex: string, blinding
 export function prove_transact(proving_key: Uint8Array, root_hex: string, ext_amount: bigint, recipient_hex: string, inputs_json: string, outputs_json: string): string;
 
 /**
- * Build a shielded → shielded transfer proof entirely in the browser.
- *
- * Fixed 2-in/2-out, matching `TransferCircuit` and the ceremony key: both
- * `inputs` and `outputs` must contain exactly two entries. Every input must
- * be a real note in the tree (the circuit proves membership for each), so a
- * single-note spend is padded with a second real note rather than a dummy; an
- * unused output is a value-0 note. Input values must equal output values
- * (the circuit enforces conservation).
- *
- * - `proving_key`: the transfer ceremony proving key bytes (transfer_proving.key)
- * - `root_hex`: the inputs' membership root (the pool's current root), 32-byte hex
- * - `inputs_json`: JSON array of 2 [`TransferInput`]
- * - `outputs_json`: JSON array of 2 [`TransferOutput`]
- *
- * Returns `{ nullifiers: [hex, hex], output_commitments: [hex, hex], proof }`;
- * the wallet computes the post-state `new_merkle_root` and POSTs the lot to the
- * transfer ingress. The spend secrets never leave the browser.
- */
-export function prove_transfer(proving_key: Uint8Array, root_hex: string, inputs_json: string, outputs_json: string): string;
-
-/**
  * Build a shielded → shielded transfer proof with the spend-key construction
  * (circuit v2, #293), entirely in the browser.
  *
- * The successor to [`prove_transfer`]. Fixed 2-in/2-out. Each input is spent by
+ * Fixed 2-in/2-out. Each input is spent by
  * proving knowledge of its private key (folded into the nullifier through a
  * signature over `(commitment, leaf_index)`), and each output binds the
  * recipient's spend public key. All notes share one `asset_id` (all-zero for
@@ -72,37 +54,17 @@ export function prove_transfer(proving_key: Uint8Array, root_hex: string, inputs
  * - `proving_key`: the v2 transfer ceremony proving key bytes
  * - `root_hex`: the inputs' membership root, 32-byte hex
  * - `asset_id_hex`: the shared asset id, 32-byte hex (all-zero = native SOL)
- * - `inputs_json`: JSON array of 2 [`TransferInputV2`]
- * - `outputs_json`: JSON array of 2 [`TransferOutputV2`]
+ * - `inputs_json`: JSON array of 2 input notes
+ * - `outputs_json`: JSON array of 2 output notes
  *
- * Returns `{ nullifiers, output_commitments, proof }` (hex), as [`prove_transfer`].
+ * Returns `{ nullifiers, output_commitments, proof }` (hex).
  */
 export function prove_transfer_v2(proving_key: Uint8Array, root_hex: string, asset_id_hex: string, inputs_json: string, outputs_json: string): string;
 
 /**
- * Build a withdrawal proof for a note the wallet owns.
- *
- * Inputs are hex/JSON so they cross the wasm boundary cleanly:
- * - `proving_key`: the ceremony proving key bytes (withdraw_proving_v4.key)
- * - `root_hex`, `recipient_hex`, `randomness_hex`, `secret_hex`: 32-byte hex
- * - `path_hex_json`: JSON array of 32-byte hex sibling hashes (root-less path)
- * - `indices_json`: JSON array of bools (sibling direction per level)
- *
- * `recipient_hex` is the note's recipient (the shielded address bound into the
- * commitment), not the on-chain withdrawal target. The proof's public inputs
- * are only `[root, nullifier, amount]`, so the destination Solana address is
- * chosen by the wallet when it assembles the ingress body.
- *
- * Returns `{ nullifier, proof }` (hex); the wallet adds the recipient, amount,
- * and fee before POSTing to the validator ingress.
- */
-export function prove_withdrawal(proving_key: Uint8Array, root_hex: string, amount: bigint, randomness_hex: string, recipient_hex: string, secret_hex: string, path_hex_json: string, indices_json: string): string;
-
-/**
  * Prove a spend-key withdrawal (circuit v2, #293).
  *
- * The successor to [`prove_withdrawal`]. Spend authority is the note's private
- * key, not a free secret: the commitment binds `Poseidon(privkey)` and the
+ * Spend authority is the note's private key rather than a free secret: the commitment binds `Poseidon(privkey)` and the
  * nullifier folds in a signature over `(commitment, leaf_index)`, so only the
  * key-holder can spend and a note at a tree position yields exactly one
  * nullifier. The proof also commits to the withdrawal's `asset_id` (finding A)
@@ -116,19 +78,22 @@ export function prove_withdrawal(proving_key: Uint8Array, root_hex: string, amou
  *   blinding and asset id (32-byte hex; asset id all-zero for native SOL)
  * - `dest_recipient_hex`: the on-chain Solana destination the funds are paid to
  * - `path_hex_json` / `indices_json`: the root-less Merkle path and its
- *   direction bits, as [`prove_withdrawal`] takes them
+ *   direction bits
  *
  * Returns `{ nullifier, proof }` (hex).
  */
 export function prove_withdrawal_v2(proving_key: Uint8Array, root_hex: string, amount: bigint, blinding_hex: string, privkey_hex: string, asset_id_hex: string, dest_recipient_hex: string, path_hex_json: string, indices_json: string): string;
 
 /**
- * Derive the spend public key from a spend private key (circuit v2, #293), hex.
+ * Derive the v2 spend public key.
  *
- * `pubkey = Poseidon(privkey)`, the value bound into a note's commitment. The
- * wallet derives its spend keypair from the account seed and publishes this
- * pubkey as part of its shielded address, so a sender can bind an output note
- * to it; only the holder of `privkey` can later spend that note.
+ * `pubkey = Poseidon(privkey)`, the value bound into a v2 note's commitment.
+ * The wallet derives its spend keypair from the account seed and publishes
+ * this pubkey as part of its shielded address, so a sender can bind an output
+ * note to it; only the holder of `privkey` can later spend that note.
+ *
+ * This is the v2 hash family (domain-tagged). The v3 equivalent is
+ * [`v3_note_pubkey`], which uses circom Poseidon and is not interchangeable.
  */
 export function spend_pubkey(privkey_hex: string): string;
 
@@ -163,16 +128,14 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly note_commitment: (a: bigint, b: number, c: number, d: number, e: number) => [number, number, number, number];
-    readonly prove_withdrawal: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number) => [number, number, number, number];
-    readonly spend_pubkey: (a: number, b: number) => [number, number, number, number];
     readonly note_commitment_v2: (a: bigint, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
-    readonly prove_withdrawal_v2: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number) => [number, number, number, number];
-    readonly prove_transfer: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
-    readonly prove_transfer_v2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
-    readonly v3_note_pubkey: (a: number, b: number) => [number, number, number, number];
-    readonly v3_note_commitment: (a: bigint, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly prove_transact: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
+    readonly prove_transfer_v2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
+    readonly prove_withdrawal_v2: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number) => [number, number, number, number];
+    readonly spend_pubkey: (a: number, b: number) => [number, number, number, number];
     readonly v3_merkle_path: (a: number, b: number, c: number) => [number, number, number, number];
+    readonly v3_note_commitment: (a: bigint, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly v3_note_pubkey: (a: number, b: number) => [number, number, number, number];
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
