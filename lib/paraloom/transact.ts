@@ -90,11 +90,31 @@ export interface V3Leaf {
   commitmentHex: string
 }
 
-function eventPayloads(logs: string[]): Uint8Array[] {
+// Collect only the `Program data:` lines our program emitted. A Solana log
+// stream interleaves `Program <id> invoke` / `Program data:` / `Program <id>
+// success|failed` from every program in the transaction, including CPIs, and the
+// event discriminators are public (`sha256("event:<Name>")[..8]`), so an
+// unrelated program in the same tx could emit a byte-identical DepositNote/
+// Transact line. `getSignaturesForAddress(programId)` only selects the tx, not
+// the emitter. Track the invoke/success stack and keep a `Program data:` line
+// only while our program is the one currently executing (top of stack).
+function eventPayloads(logs: string[], expectedProgramId: string): Uint8Array[] {
   const out: Uint8Array[] = []
+  const stack: string[] = []
   for (const line of logs) {
-    const m = line.match(/^Program data: (.+)$/)
-    if (m) out.push(Uint8Array.from(Buffer.from(m[1], "base64")))
+    const invoke = line.match(/^Program (\S+) invoke \[\d+\]$/)
+    if (invoke) {
+      stack.push(invoke[1])
+      continue
+    }
+    if (/^Program \S+ (success|failed)/.test(line)) {
+      stack.pop()
+      continue
+    }
+    const data = line.match(/^Program data: (.+)$/)
+    if (data && stack[stack.length - 1] === expectedProgramId) {
+      out.push(Uint8Array.from(Buffer.from(data[1], "base64")))
+    }
   }
   return out
 }
@@ -162,7 +182,7 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
       )
     }
     const logs = tx.meta?.logMessages ?? []
-    for (const payload of eventPayloads(logs)) {
+    for (const payload of eventPayloads(logs, PROGRAM_ID)) {
       if (startsWith(payload, DEPOSIT_NOTE_EVENT_DISCRIMINATOR)) {
         const body = payload.slice(8)
         const commitment = body.slice(40, 72)
