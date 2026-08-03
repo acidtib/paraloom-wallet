@@ -104,8 +104,22 @@ export function validateSeedPhrase(seedPhrase: string): boolean {
 }
 
 /**
- * Derive keypair from seed phrase with account index
- * Uses derivation path: m/44'/501'/{accountIndex}'/0'
+ * Derive an ed25519 keypair from a BIP39 mnemonic and account index.
+ *
+ * NOTE: this is a Paraloom-specific derivation, NOT the standard Solana
+ * BIP44/SLIP-0010 path `m/44'/501'/{accountIndex}'/0'`. The account seed is
+ * `SHA-256(bip39_seed || u32be(accountIndex))`, fed straight into
+ * `nacl.sign.keyPair.fromSeed` — no chain code, no per-component hardened child
+ * derivation. It is deterministic and reproduces the same accounts across
+ * installs, but a mnemonic exported from a standard-path wallet (e.g. Phantom)
+ * derives DIFFERENT accounts here, and vice versa. An offline recovery tool must
+ * reproduce THIS exact mapping, not the SLIP-0010 path.
+ *
+ * Switching to the standard path is a breaking migration, not an edit: the
+ * primary wallet's keys are stored directly in the encrypted vault while the
+ * account list is reconstructed from index on unlock, so a silent change would
+ * leave the two on different algorithms. Any such change must ship a
+ * derivation-version marker (#3).
  */
 export async function deriveKeypairFromSeed(
   seedPhrase: string,
