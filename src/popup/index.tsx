@@ -6,7 +6,14 @@ import { useWalletStore } from "~lib/store/walletStore"
 import { ConnectApprove } from "~src/popup/ConnectApprove"
 import { Home } from "~src/popup/Home"
 import { Onboarding } from "~src/popup/Onboarding"
+import { SwapApprove } from "~src/popup/SwapApprove"
 import { Unlock } from "~src/popup/Unlock"
+
+interface PendingSwap {
+  id: number
+  origin: string
+  params: { outputMint: string; amountLamports: string; slippageBps?: number }
+}
 
 import "./style.css"
 
@@ -19,6 +26,7 @@ function Popup() {
   const [locked, setLocked] = useState(true)
   const [loading, setLoading] = useState(true)
   const [pending, setPending] = useState<{ id: number; origin: string } | null>(null)
+  const [pendingSwap, setPendingSwap] = useState<PendingSwap | null>(null)
 
   useEffect(() => {
     initWallet()
@@ -60,14 +68,20 @@ function Popup() {
     // frame between unlock and the pending lookup. (A connection request is only
     // actionable once unlocked.)
     let p: { id: number; origin: string } | null = null
+    let ps: PendingSwap | null = null
     if (wallet && !isLocked) {
       p = (await sendMessage({ type: "GET_PENDING_CONNECTION" })) as
         | { id: number; origin: string }
         | null
+      // A pending swap only matters when there's no connection to approve first.
+      if (!p) {
+        ps = (await sendMessage({ type: "GET_PENDING_SWAP" })) as PendingSwap | null
+      }
     }
 
     setHasWallet(!!wallet)
     setPending(p)
+    setPendingSwap(ps)
     setLocked(isLocked)
     setLoading(false)
   }
@@ -103,6 +117,19 @@ function Popup() {
           id={pending.id}
           origin={pending.origin}
           onResolved={() => setPending(null)}
+        />
+      </div>
+    )
+  }
+
+  if (pendingSwap) {
+    return (
+      <div className="app">
+        <SwapApprove
+          id={pendingSwap.id}
+          origin={pendingSwap.origin}
+          params={pendingSwap.params}
+          onResolved={() => setPendingSwap(null)}
         />
       </div>
     )
