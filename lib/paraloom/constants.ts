@@ -38,3 +38,8 @@ export const PATH_SERVER_URL = "https://node.paraloom.io"
 export const INGRESS_URL = "https://node.paraloom.io"
 export const TRANSFER_INGRESS_URL = "https://node.paraloom.io"
 export const TRANSACT_INGRESS_URL = "https://node.paraloom.io"
+
+// Non-custodial swap routing service (paraloom-core `swap-router`). Builds an
+// UNSIGNED Jupiter swap transaction for a fresh address; the wallet signs it
+// locally, so the service never sees a key. Same host, `/swap/*` path.
+export const SWAP_ROUTER_URL = "https://node.paraloom.io"
