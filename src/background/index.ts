@@ -1,9 +1,19 @@
+import { Connection } from "@solana/web3.js"
+
 import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
 import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
-import { shieldedBalance } from "~lib/paraloom/notes"
+import { getNotes, shieldedBalance, type ShieldedNote } from "~lib/paraloom/notes"
 import { scanForNotes } from "~lib/paraloom/scan"
 import { solanaAddress } from "~lib/paraloom/bridge"
+import { privateSwap } from "~lib/paraloom/privateSwap"
+import { saveSwapOutput } from "~lib/paraloom/swapOutputs"
+import { NATIVE_ASSET_HEX } from "~lib/prover"
+
+// Private swaps are mainnet-only (Jupiter liquidity) and rebuilding the v3 tree
+// needs an archival RPC, so the swap always runs against the node's archival
+// proxy regardless of the wallet's selected network.
+const PRIVATE_SWAP_RPC_URL = "https://node.paraloom.io/rpc"
 
 // Connected dApp state (in-memory only)
 let connectedOrigin: string | null = null
@@ -52,6 +62,27 @@ let pendingConnection:
   | null = null
 let connectionIdCounter = 0
 
+// A private-swap request awaiting the user's explicit per-request approval in
+// the popup. A swap SPENDS shielded funds, so it must never proceed on the
+// ambient connection alone — the user approves the exact amount + output token
+// every time, exactly like a connection approval but for a spend. At most one
+// is outstanding at a time.
+interface SwapRequestParams {
+  outputMint: string
+  /** lamports as a decimal string (BigInt doesn't cross the message bridge). */
+  amountLamports: string
+  slippageBps?: number
+}
+let pendingSwap:
+  | {
+      id: number
+      origin: string
+      params: SwapRequestParams
+      resolve: (approved: boolean) => void
+    }
+  | null = null
+let swapIdCounter = 0
+
 
 // Message types the popup UI is the only legitimate sender of. A page relayed
 // through the content script must never reach these: `GET_PENDING_CONNECTION`
@@ -69,7 +100,13 @@ const POPUP_ONLY_TYPES = new Set([
   "LOCK_WALLET",
   "GET_PENDING_CONNECTION",
   "APPROVE_CONNECTION",
-  "REJECT_CONNECTION"
+  "REJECT_CONNECTION",
+  // Swap approval — same reasoning as the connection ones: a page that could
+  // send these would read the pending swap id and approve its own spend,
+  // defeating the per-request consent screen.
+  "GET_PENDING_SWAP",
+  "APPROVE_SWAP",
+  "REJECT_SWAP"
 ])
 
 function isFromPopup(sender: chrome.runtime.MessageSender): boolean {
@@ -159,6 +196,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return false
   }
 
+  // ── Swap-approval messages (from the popup only) ──
+
+  if (message.type === "GET_PENDING_SWAP") {
+    sendResponse(
+      pendingSwap
+        ? { id: pendingSwap.id, origin: pendingSwap.origin, params: pendingSwap.params }
+        : null
+    )
+    return false
+  }
+
+  if (message.type === "APPROVE_SWAP") {
+    if (pendingSwap && pendingSwap.id === message.id) {
+      pendingSwap.resolve(true)
+    }
+    sendResponse({ success: true })
+    return false
+  }
+
+  if (message.type === "REJECT_SWAP") {
+    if (pendingSwap && pendingSwap.id === message.id) {
+      pendingSwap.resolve(false)
+    }
+    sendResponse({ success: true })
+    return false
+  }
+
   if (message.type === "GET_ADDRESS") {
     handleGetAddress(sender).then(sendResponse).catch(() => {
       sendResponse({ address: null })
@@ -215,6 +279,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           .then(sendResponse)
           .catch((err) => sendResponse({ success: false, error: err.message }))
       })
+      .catch((err) => sendResponse({ success: false, error: err.message }))
+    return true
+  }
+
+  if (message.type === "PRIVATE_SWAP") {
+    // A spend: authorized sender + explicit per-request approval, both required.
+    handlePrivateSwapRequest(message.params, sender)
+      .then(sendResponse)
       .catch((err) => sendResponse({ success: false, error: err.message }))
     return true
   }
@@ -429,6 +501,135 @@ async function handlePrivateTransfer(_params: { recipient: string; amount: numbe
   }
 
   throw new Error("Paraloom Network is not yet live. Transfers will be available at mainnet launch.")
+}
+
+// Register a pending swap approval and resolve once the user approves/rejects it
+// in the popup (or the timeout elapses → rejection). Mirrors requestApproval.
+function requestSwapApproval(
+  origin: string,
+  params: SwapRequestParams,
+  timeoutMs: number
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    const id = ++swapIdCounter
+    const timer = setTimeout(() => {
+      if (pendingSwap?.id === id) {
+        pendingSwap = null
+        resolve(false)
+      }
+    }, timeoutMs)
+    pendingSwap = {
+      id,
+      origin,
+      params,
+      resolve: (approved: boolean) => {
+        clearTimeout(timer)
+        pendingSwap = null
+        resolve(approved)
+      }
+    }
+  })
+}
+
+// Page-facing entry: authorize the caller, get explicit per-request approval,
+// then execute. No spend happens without BOTH an approved origin AND a fresh
+// user confirmation of the exact amount + output token.
+async function handlePrivateSwapRequest(
+  params: SwapRequestParams,
+  sender: chrome.runtime.MessageSender
+): Promise<{ success: boolean; data?: unknown; error?: string }> {
+  if (!(await isAuthorizedSender(sender))) {
+    return { success: false, error: "not authorized" }
+  }
+  const origin = senderOrigin(sender)
+  if (!origin) return { success: false, error: "unknown origin" }
+  if (!params || typeof params.outputMint !== "string" || typeof params.amountLamports !== "string") {
+    return { success: false, error: "invalid params" }
+  }
+
+  // Show the approval window (the popup requires unlock before it renders the
+  // approval, so a locked wallet can never auto-approve). Register the pending
+  // request BEFORE opening so the popup finds it immediately after unlock.
+  const decision = requestSwapApproval(origin, params, 180_000)
+  await openWalletWindow()
+  const approved = await decision
+  if (!approved) return { success: false, error: "rejected" }
+
+  return handlePrivateSwap(params)
+}
+
+// The actual spend. Runs only after handlePrivateSwapRequest approved it.
+async function handlePrivateSwap(
+  params: SwapRequestParams
+): Promise<{ success: boolean; data?: unknown; error?: string }> {
+  const session = await loadSession()
+  if (!session) throw new Error("wallet is locked")
+
+  const amount = BigInt(params.amountLamports)
+  if (amount <= 0n) throw new Error("amount must be > 0")
+
+  const shieldedAddress = session.wallet.shieldedAddress
+  const spendPrivkeyHex = Buffer.from(session.wallet.spendPrivkey).toString("hex")
+  const ownBoxPubHex = Buffer.from(session.wallet.boxPublicKey).toString("hex")
+
+  const notes = (await getNotes(shieldedAddress)).filter(
+    (n) => !n.spent && n.assetId === NATIVE_ASSET_HEX
+  )
+  const inputs = selectNotes(notes, amount)
+
+  const connection = new Connection(PRIVATE_SWAP_RPC_URL, "confirmed")
+  const result = await privateSwap(
+    connection,
+    shieldedAddress,
+    spendPrivkeyHex,
+    ownBoxPubHex,
+    inputs,
+    {
+      outputMint: params.outputMint,
+      amountLamports: amount,
+      slippageBps: params.slippageBps ?? 100
+    }
+  )
+
+  // Persist the fresh key so the bought token is recoverable — it never leaves
+  // the wallet, and is NOT returned to the page.
+  await saveSwapOutput({
+    freshAddress: result.freshAddress,
+    freshSecretKeyHex: Buffer.from(result.freshSecretKey).toString("hex"),
+    outputMint: params.outputMint,
+    outAmount: result.outAmount,
+    swapSignature: result.swapSignature,
+    createdAt: Date.now()
+  })
+  void recordActivity(Date.now())
+
+  return {
+    success: true,
+    data: {
+      freshAddress: result.freshAddress,
+      swapSignature: result.swapSignature,
+      outAmount: result.outAmount
+    }
+  }
+}
+
+// Pick up to two unspent native notes covering `amount` (spendV3 spends 1–2 and
+// returns change). Largest-first keeps the note count minimal.
+function selectNotes(notes: ShieldedNote[], amount: bigint): ShieldedNote[] {
+  if (notes.length === 0) throw new Error("no shielded notes to spend")
+  const sorted = [...notes].sort((a, b) => {
+    const d = BigInt(b.amount) - BigInt(a.amount)
+    return d > 0n ? 1 : d < 0n ? -1 : 0
+  })
+  const chosen: ShieldedNote[] = []
+  let sum = 0n
+  for (const n of sorted) {
+    chosen.push(n)
+    sum += BigInt(n.amount)
+    if (sum >= amount) return chosen
+    if (chosen.length === 2) break
+  }
+  throw new Error("insufficient shielded balance for this amount (max 2 notes per swap)")
 }
 
 export {}

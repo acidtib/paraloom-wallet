@@ -61,6 +61,19 @@ if (!(window as any).paraloom) {
       if (r?.success) return r.txHash
       throw new Error(r?.error || "Transfer failed")
     },
+    // Private swap-out: spend a shielded note, exit at a fresh unlinkable
+    // address, and buy `outputMint` there. `params.amountLamports` is a decimal
+    // string. Requires the user to approve the exact amount + token in the
+    // wallet popup; resolves to { freshAddress, swapSignature, outAmount }.
+    privateSwap: async (params: {
+      outputMint: string
+      amountLamports: string
+      slippageBps?: number
+    }) => {
+      const r = await relay("PRIVATE_SWAP", { params })
+      if (r?.success) return r.data
+      throw new Error(r?.error || "Private swap failed")
+    },
     getAddress: async () => {
       const r = await relay("GET_ADDRESS")
       return r?.address ?? null
