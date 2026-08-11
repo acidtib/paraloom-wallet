@@ -125,6 +125,20 @@ export async function privateSwap(
   const fresh = Keypair.generate()
   const freshHex = Buffer.from(fresh.publicKey.toBytes()).toString("hex")
 
+  // Persist the fresh key up front, BEFORE the withdraw funds it. The withdrawn
+  // SOL (and later the bought token) live at this address and are spendable only
+  // with this key, so it must be saved before anything that can throw — a failed
+  // route or a dropped worker must never strand the funds. The realized amount +
+  // signature are filled in by an upsert once the swap lands.
+  await saveSwapOutput({
+    freshAddress: fresh.publicKey.toBase58(),
+    freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    outputMint: params.outputMint,
+    outAmount: 0,
+    swapSignature: "",
+    createdAt: Date.now()
+  })
+
   // 2. Withdraw the note value to the fresh address via the 2-of-2 quorum.
   const { requestId } = await spendV3(
     connection,

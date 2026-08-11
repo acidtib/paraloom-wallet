@@ -600,7 +600,11 @@ async function handlePrivateSwapRequest(
   const approved = await withKeepAlive(decision)
   if (!approved) return { success: false, error: "rejected" }
 
-  return handlePrivateSwap(params)
+  // Keep the worker alive across the whole swap (withdraw settlement + Jupiter,
+  // up to ~2-3 min), not just the approval — otherwise the worker is evicted
+  // mid-swap, the held response is dropped ("message channel closed"), and the
+  // swap is cut off before it can finish and persist its output.
+  return withKeepAlive(handlePrivateSwap(params))
 }
 
 // The actual spend. Runs only after handlePrivateSwapRequest approved it.

@@ -1,7 +1,7 @@
 {
   "name": "paraloom-wallet",
   "displayName": "Paraloom Wallet",
-  "version": "1.5.3",
+  "version": "1.5.4",
   "description": "Privacy-focused wallet for Paraloom Network. Create shielded wallets, manage accounts, and connect to dApps.",
   "scripts": {
     "dev": "plasmo dev",

@@ -688,12 +688,12 @@ export function Home({ onLock }: HomeProps) {
                       <div className="empty-subtitle" style={{ marginBottom: 4 }}>Private buys</div>
                       {swapOutputs.map((s, i) => (
                         <a
-                          key={s.swapSignature || i}
+                          key={s.freshAddress || i}
                           className="activity-item"
-                          href={`https://solscan.io/tx/${s.swapSignature}`}
+                          href={`https://solscan.io/account/${s.freshAddress}`}
                           target="_blank"
                           rel="noreferrer"
-                          title="View on Solscan"
+                          title="View the unlinkable address on Solscan"
                         >
                           <div className="activity-icon">
                             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -707,8 +707,9 @@ export function Home({ onLock }: HomeProps) {
                             <div className="activity-row">
                               <span className="activity-title">Private buy</span>
                               <span className="activity-amount">
-                                {(s.outAmount / 1e6).toFixed(4)}{" "}
-                                {s.outputMint === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" ? "USDC" : "token"}
+                                {s.outAmount > 0
+                                  ? `${(s.outAmount / 1e6).toFixed(4)} ${s.outputMint === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" ? "USDC" : "token"}`
+                                  : "pending…"}
                               </span>
                             </div>
                             <div className="activity-row">
