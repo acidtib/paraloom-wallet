@@ -5,9 +5,20 @@
 // sender key per output — byte-compatible with core's `crypto_box` (pinned by
 // core's tweetnacl interop test).
 //
-// Wire format (matches core's `EncryptedNote`):
-//   bundle = epk(32) || nonce(24) || ct        (ct = tag(16) || ciphertext, NaCl)
+// Wire format (matches core's canonical `EncryptedNote`, tagged since #697):
+//   bundle = tag(1) || epk(32) || nonce(24) || ct   (v1 tag = 0x01;
+//            ct = tag(16) || ciphertext, NaCl)
 //   NotePlaintext = amount(8, LE) || blinding(32) || assetId(32)  = 72 bytes (v2)
+//
+// The version tag is REQUIRED: core's `/transact/submit` runs `check_relayable`
+// on every ciphertext and rejects the reserved tag 0. An untagged bundle put
+// `epk[0]` where the tag byte is read, so a transact was rejected whenever an
+// ephemeral key happened to start with 0x00 (~0.78% per 2-output transact) and
+// only succeeded on retry (paraloom-wallet#6).
+
+// v1 envelope tag: `crypto_box` (X25519 + XSalsa20-Poly1305). The remainder is
+// byte-identical to the pre-tag encoding.
+const ENVELOPE_TAG_V1 = 0x01
 
 import { randomBytes } from "@noble/hashes/utils"
 import * as nacl from "tweetnacl"
@@ -53,10 +64,11 @@ export function encryptNote(recipientBoxPubHex: string, note: NotePlaintext): st
   const nonce = randomBytes(nacl.box.nonceLength) // 24
   const ct = nacl.box(encodePlaintext(note), nonce, recipientPub, ephemeral.secretKey)
 
-  const bundle = new Uint8Array(32 + 24 + ct.length)
-  bundle.set(ephemeral.publicKey, 0)
-  bundle.set(nonce, 32)
-  bundle.set(ct, 56)
+  const bundle = new Uint8Array(1 + 32 + 24 + ct.length)
+  bundle[0] = ENVELOPE_TAG_V1
+  bundle.set(ephemeral.publicKey, 1)
+  bundle.set(nonce, 33)
+  bundle.set(ct, 57)
   return bytesToHex(bundle)
 }
 
@@ -67,20 +79,26 @@ export function encryptNote(recipientBoxPubHex: string, note: NotePlaintext): st
  */
 export function tryDecryptNote(boxSecretKey: Uint8Array, bundleHex: string): NotePlaintext | null {
   const bundle = hexToBytes(bundleHex)
-  if (bundle.length < 56 + 16) {
-    return null
-  }
-  const epk = bundle.slice(0, 32)
-  const nonce = bundle.slice(32, 56)
-  const ct = bundle.slice(56)
 
-  const pt = nacl.box.open(ct, nonce, epk, boxSecretKey)
-  if (!pt || pt.length !== 72) {
-    return null
+  // Parse the v1-tagged envelope (epk at offset 1) and, for notes delivered
+  // before the tag was added, the legacy untagged one (epk at offset 0). When
+  // the first byte is 0x01 both are possible (a legacy epk can start with 0x01),
+  // so try tagged first then legacy; `box.open` authenticates, so only the
+  // correct parse decrypts. Otherwise it can only be legacy.
+  const offsets = bundle[0] === ENVELOPE_TAG_V1 ? [1, 0] : [0]
+  for (const off of offsets) {
+    if (bundle.length < off + 56 + 16) continue
+    const epk = bundle.slice(off, off + 32)
+    const nonce = bundle.slice(off + 32, off + 56)
+    const ct = bundle.slice(off + 56)
+    const pt = nacl.box.open(ct, nonce, epk, boxSecretKey)
+    if (pt && pt.length === 72) {
+      return {
+        amount: new DataView(pt.buffer, pt.byteOffset, 72).getBigUint64(0, true),
+        blindingHex: bytesToHex(pt.slice(8, 40)),
+        assetIdHex: bytesToHex(pt.slice(40, 72))
+      }
+    }
   }
-  return {
-    amount: new DataView(pt.buffer, pt.byteOffset, 72).getBigUint64(0, true),
-    blindingHex: bytesToHex(pt.slice(8, 40)),
-    assetIdHex: bytesToHex(pt.slice(40, 72))
-  }
+  return null
 }
