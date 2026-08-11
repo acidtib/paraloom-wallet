@@ -70,12 +70,21 @@ function Popup() {
     let p: { id: number; origin: string } | null = null
     let ps: PendingSwap | null = null
     if (wallet && !isLocked) {
-      p = (await sendMessage({ type: "GET_PENDING_CONNECTION" })) as
-        | { id: number; origin: string }
-        | null
+      const pRaw = (await sendMessage({ type: "GET_PENDING_CONNECTION" })) as unknown
+      // Only a real pending request (with a numeric id) counts — never an error
+      // object like { success:false, error:"not permitted" }, which would render
+      // the approval screen with an undefined id.
+      p =
+        pRaw && typeof (pRaw as { id?: unknown }).id === "number"
+          ? (pRaw as { id: number; origin: string })
+          : null
       // A pending swap only matters when there's no connection to approve first.
       if (!p) {
-        ps = (await sendMessage({ type: "GET_PENDING_SWAP" })) as PendingSwap | null
+        const psRaw = (await sendMessage({ type: "GET_PENDING_SWAP" })) as unknown
+        ps =
+          psRaw && typeof (psRaw as { id?: unknown }).id === "number"
+            ? (psRaw as PendingSwap)
+            : null
       }
     }
 

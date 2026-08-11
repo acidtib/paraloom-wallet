@@ -19,10 +19,16 @@ export interface SwapOutput {
 
 const KEY = "paraloom_swap_outputs"
 
+// Upsert by freshAddress: the key is saved early (before the withdraw) so it can
+// never be lost, then the same entry is updated with the realized amount +
+// signature once the swap lands. Keyed on the address so the two writes collapse
+// to one row.
 export async function saveSwapOutput(output: SwapOutput): Promise<void> {
   const stored = await chrome.storage.local.get(KEY)
   const current = (stored[KEY] as SwapOutput[]) ?? []
-  current.push(output)
+  const i = current.findIndex((o) => o.freshAddress === output.freshAddress)
+  if (i >= 0) current[i] = { ...current[i], ...output }
+  else current.push(output)
   await chrome.storage.local.set({ [KEY]: current })
 }
 

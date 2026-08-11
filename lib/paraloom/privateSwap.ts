@@ -22,6 +22,7 @@ import {
 
 import { SWAP_ROUTER_URL } from "./constants"
 import type { ShieldedNote } from "./notes"
+import { saveSwapOutput } from "./swapOutputs"
 import { spendV3 } from "./transactFlow"
 
 /** Lamports left at the fresh address to cover the swap's own costs: the output
@@ -59,6 +60,36 @@ export interface PrivateSwapResult {
   outAmount: number
 }
 
+// Wait for the swap transaction to confirm by polling its signature status.
+// Unlike connection.confirmTransaction (hard 30s deadline), this tolerates a
+// busy mainnet: it only rejects on a real on-chain error or if the tx never
+// confirms within the window.
+async function waitForSwapConfirmation(
+  connection: Connection,
+  signature: string,
+  timeoutMs = 90_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const st = await connection.getSignatureStatus(signature, {
+      searchTransactionHistory: true
+    })
+    const v = st.value
+    if (v) {
+      if (v.err) {
+        throw new Error(`swap transaction failed on-chain: ${JSON.stringify(v.err)}`)
+      }
+      if (v.confirmationStatus === "confirmed" || v.confirmationStatus === "finalized") {
+        return
+      }
+    }
+    await new Promise((r) => setTimeout(r, 2000))
+  }
+  throw new Error(
+    `swap submitted (${signature}) but not confirmed within ${timeoutMs / 1000}s — check the explorer`
+  )
+}
+
 async function waitForFunding(
   connection: Connection,
   pubkey: Keypair["publicKey"]
@@ -93,6 +124,20 @@ export async function privateSwap(
   // 1. Fresh ephemeral key — generated here, never sent anywhere.
   const fresh = Keypair.generate()
   const freshHex = Buffer.from(fresh.publicKey.toBytes()).toString("hex")
+
+  // Persist the fresh key up front, BEFORE the withdraw funds it. The withdrawn
+  // SOL (and later the bought token) live at this address and are spendable only
+  // with this key, so it must be saved before anything that can throw — a failed
+  // route or a dropped worker must never strand the funds. The realized amount +
+  // signature are filled in by an upsert once the swap lands.
+  await saveSwapOutput({
+    freshAddress: fresh.publicKey.toBase58(),
+    freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    outputMint: params.outputMint,
+    outAmount: 0,
+    swapSignature: "",
+    createdAt: Date.now()
+  })
 
   // 2. Withdraw the note value to the fresh address via the 2-of-2 quorum.
   const { requestId } = await spendV3(
@@ -148,7 +193,26 @@ export async function privateSwap(
   const swapSignature = await connection.sendRawTransaction(tx.serialize(), {
     maxRetries: 5
   })
-  await connection.confirmTransaction(swapSignature, "confirmed")
+
+  // Persist the fresh key + output NOW, the instant the swap is submitted and
+  // BEFORE waiting for confirmation. The bought token lives at this fresh
+  // address and is only spendable with this key, so it must never be lost to a
+  // later throw (a confirm timeout used to strand it). Saving here also makes it
+  // show up under "Private buys" immediately.
+  await saveSwapOutput({
+    freshAddress: fresh.publicKey.toBase58(),
+    freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    outputMint: params.outputMint,
+    outAmount: out_amount,
+    swapSignature,
+    createdAt: Date.now()
+  })
+
+  // Poll the signature status rather than connection.confirmTransaction, whose
+  // 30s deadline throws "not confirmed in 30 seconds" on a busy mainnet even
+  // when the swap actually lands. We wait up to ~90s and only fail on a real
+  // on-chain error (or if it truly never confirms).
+  await waitForSwapConfirmation(connection, swapSignature)
 
   return {
     freshAddress: fresh.publicKey.toBase58(),

@@ -1,5 +1,6 @@
-// Paraloom bridge program on Solana. The same program the validator network
-// indexes deposits from and settles withdrawals to (devnet, pre-mainnet).
+// Paraloom bridge program on Solana. The same program id is deployed on both
+// mainnet-beta (capped beta) and devnet; the cluster is chosen by the network
+// selector, not the program id.
 export const PROGRAM_ID = "8gPsRSm1CAw38mfzc1bcLMUXyFN7LnS8k6CV5hPUTWrP"
 
 // Anchor instruction discriminators (first 8 bytes of the instruction data),
@@ -19,10 +20,14 @@ export const BRIDGE_STATE_SEED = "bridge_state"
 export const BRIDGE_VAULT_SEED = "bridge_vault"
 export const MERKLE_TREE_SEED = "merkle_tree"
 
-// Public RPC endpoints. No API key is stored in the extension; the public
-// devnet endpoint is enough for sending a deposit (a single transaction).
+// RPC endpoints. No API key is stored in the extension. Rebuilding the v3 tree
+// (fetchV3Leaves) pages the program's full signature history and reads each
+// leaf tx, which the public mainnet endpoint rate-limits and prunes; mainnet
+// therefore routes through node.paraloom.io/rpc, a server-side proxy to an
+// archival provider that keeps the key off the client. Devnet's public
+// endpoint is enough for its lighter, non-pruned history.
 export const RPC_URLS: Record<"mainnet-beta" | "devnet", string> = {
-  "mainnet-beta": "https://api.mainnet-beta.solana.com",
+  "mainnet-beta": "https://node.paraloom.io/rpc",
   devnet: "https://api.devnet.solana.com"
 }
 
