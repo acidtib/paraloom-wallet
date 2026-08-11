@@ -328,8 +328,13 @@ export function Home({ onLock }: HomeProps) {
   async function handleTransfer() {
     if (!wallet) return
     const to = transferAddress.trim()
-    if (!to.startsWith("paraloom1")) {
-      showToast("Enter a paraloom1… shielded address", "error")
+    // A v2 shielded address is `paraloom1` + box(64 hex) + spend(64 hex). Validate
+    // the full shape, not just the prefix: a malformed address that only passed
+    // the prefix check would spend into an undecryptable note and strand the
+    // funds (paraloom-core#770).
+    const body = to.startsWith("paraloom1") ? to.slice("paraloom1".length) : ""
+    if (body.length !== 128 || !/^[0-9a-fA-F]+$/.test(body)) {
+      showToast("Enter a valid paraloom1… shielded address", "error")
       return
     }
     if (to === wallet.shieldedAddress) {

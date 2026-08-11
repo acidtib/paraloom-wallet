@@ -29,7 +29,12 @@ function Popup() {
   const [pendingSwap, setPendingSwap] = useState<PendingSwap | null>(null)
 
   useEffect(() => {
-    initWallet()
+    // A storage read throwing in initWallet must not leave the popup stuck on
+    // "Loading…" forever (paraloom-core#769). Fall back to the locked/onboarding
+    // decision, which re-reads state and always resolves the loading flag.
+    initWallet().catch(() => {
+      void checkWalletState().catch(() => setLoading(false))
+    })
   }, [])
 
   async function initWallet() {
