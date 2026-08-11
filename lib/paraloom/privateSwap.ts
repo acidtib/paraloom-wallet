@@ -59,6 +59,36 @@ export interface PrivateSwapResult {
   outAmount: number
 }
 
+// Wait for the swap transaction to confirm by polling its signature status.
+// Unlike connection.confirmTransaction (hard 30s deadline), this tolerates a
+// busy mainnet: it only rejects on a real on-chain error or if the tx never
+// confirms within the window.
+async function waitForSwapConfirmation(
+  connection: Connection,
+  signature: string,
+  timeoutMs = 90_000
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const st = await connection.getSignatureStatus(signature, {
+      searchTransactionHistory: true
+    })
+    const v = st.value
+    if (v) {
+      if (v.err) {
+        throw new Error(`swap transaction failed on-chain: ${JSON.stringify(v.err)}`)
+      }
+      if (v.confirmationStatus === "confirmed" || v.confirmationStatus === "finalized") {
+        return
+      }
+    }
+    await new Promise((r) => setTimeout(r, 2000))
+  }
+  throw new Error(
+    `swap submitted (${signature}) but not confirmed within ${timeoutMs / 1000}s — check the explorer`
+  )
+}
+
 async function waitForFunding(
   connection: Connection,
   pubkey: Keypair["publicKey"]
@@ -148,7 +178,11 @@ export async function privateSwap(
   const swapSignature = await connection.sendRawTransaction(tx.serialize(), {
     maxRetries: 5
   })
-  await connection.confirmTransaction(swapSignature, "confirmed")
+  // Poll the signature status rather than connection.confirmTransaction, whose
+  // 30s deadline throws "not confirmed in 30 seconds" on a busy mainnet even
+  // when the swap actually lands. We wait up to ~90s and only fail on a real
+  // on-chain error (or if it truly never confirms).
+  await waitForSwapConfirmation(connection, swapSignature)
 
   return {
     freshAddress: fresh.publicKey.toBase58(),

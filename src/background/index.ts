@@ -110,8 +110,14 @@ const POPUP_ONLY_TYPES = new Set([
 ])
 
 function isFromPopup(sender: chrome.runtime.MessageSender): boolean {
-  // No tab → the extension's own UI. A page relay always has one.
-  return sender.tab === undefined
+  // A message from the extension's OWN pages (the popup) carries a
+  // chrome-extension:// URL; a page relay (content script) carries the web
+  // page's https:// URL. The old `sender.tab === undefined` heuristic was WRONG:
+  // openWalletWindow opens the popup via chrome.windows.create, which IS a tab,
+  // so every popup-only message (GET_PENDING_CONNECTION / APPROVE_CONNECTION /
+  // GET_PENDING_SWAP / APPROVE_SWAP) was rejected as "not permitted" — the
+  // approval popup could never read or resolve its own request.
+  return !!sender.url && sender.url.startsWith(chrome.runtime.getURL(""))
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -172,23 +178,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // ── Connection-approval messages (from the popup) ──
 
   if (message.type === "GET_PENDING_CONNECTION") {
-    sendResponse(
-      pendingConnection
-        ? { id: pendingConnection.id, origin: pendingConnection.origin }
-        : null
-    )
-    return false
+    // Read from persisted storage so the approval screen still appears even if
+    // the worker was recycled after the request was registered.
+    chrome.storage.session
+      .get("pendingConn")
+      .then((r) => sendResponse((r.pendingConn as { id: number; origin: string } | undefined) ?? null))
+      .catch(() => sendResponse(null))
+    return true
   }
 
   if (message.type === "APPROVE_CONNECTION") {
-    if (pendingConnection && pendingConnection.id === message.id) {
-      pendingConnection.resolve(true)
-    }
-    sendResponse({ success: true })
-    return false
+    // Record the approval from PERSISTED pending state, so it works even in a
+    // worker that respawned after the original CONNECT_WALLET handler (and its
+    // in-memory pendingConnection + held response) were evicted mid-wait. The
+    // page confirms the connection by polling isConnected(), which reads this
+    // durable approval — no reliance on a held response surviving the wait.
+    chrome.storage.session
+      .get("pendingConn")
+      .then(async (r) => {
+        const pc = r.pendingConn as { id: number; origin: string } | undefined
+        if (pc && pc.id === message.id) {
+          connectedOrigin = pc.origin
+          await addApprovedOrigin(pc.origin)
+          await chrome.storage.session.remove("pendingConn").catch(() => {})
+          if (pendingConnection && pendingConnection.id === message.id) {
+            pendingConnection.resolve(true)
+          }
+        }
+        sendResponse({ success: true })
+      })
+      .catch(() => sendResponse({ success: true }))
+    return true
   }
 
   if (message.type === "REJECT_CONNECTION") {
+    void chrome.storage.session.remove("pendingConn").catch(() => {})
     if (pendingConnection && pendingConnection.id === message.id) {
       pendingConnection.resolve(false)
     }
@@ -331,7 +355,7 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
   // Trusted site but locked → only needs an unlock, no approval prompt.
   if (alreadyApproved) {
     await openWalletWindow()
-    const stillLocked = await waitForUnlock(90_000)
+    const stillLocked = await withKeepAlive(waitForUnlock(90_000))
     if (stillLocked) {
       throw new Error("Connection request timed out — unlock the wallet and try again.")
     }
@@ -344,7 +368,7 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
   // through to the Home screen. The user approves on the (post-unlock) screen.
   const decision = requestApproval(origin, 120_000)
   await openWalletWindow()
-  const approved = await decision
+  const approved = await withKeepAlive(decision)
   if (!approved) {
     throw new Error("Connection request rejected")
   }
@@ -357,9 +381,12 @@ async function handleConnect(sender: chrome.runtime.MessageSender) {
 function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
   return new Promise((resolve) => {
     const id = ++connectionIdCounter
+    const clearPersisted = () =>
+      void chrome.storage.session.remove("pendingConn").catch(() => {})
     const timer = setTimeout(() => {
       if (pendingConnection?.id === id) {
         pendingConnection = null
+        clearPersisted()
         resolve(false)
       }
     }, timeoutMs)
@@ -369,15 +396,34 @@ function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
       resolve: (approved: boolean) => {
         clearTimeout(timer)
         pendingConnection = null
+        clearPersisted()
         resolve(approved)
       }
     }
+    // Persist so the pending approval survives an MV3 worker eviction during the
+    // wait: the popup reads it via GET_PENDING_CONNECTION and APPROVE_CONNECTION
+    // records the approval from it, even in a freshly respawned worker.
+    void chrome.storage.session.set({ pendingConn: { id, origin } }).catch(() => {})
   })
 }
 
 // Open the wallet UI in a popup window so the user can unlock to approve a
 // connection. chrome.action.openPopup() is unreliable in MV3, so we open the
 // popup page as its own window.
+// MV3 keep-alive. A connect/swap approval waits on the user (unlock + approve),
+// which can take longer than Chrome's ~30s idle eviction of the service worker.
+// If the worker is evicted mid-wait, the in-memory pending request AND the held
+// `sendResponse` are lost, so the page's connect()/privateSwap() never gets a
+// reply and hangs forever. Pinging a chrome API every 20s resets the eviction
+// timer for the duration of the wait, keeping the worker (and the pending state)
+// alive until the user decides.
+function withKeepAlive<T>(p: Promise<T>): Promise<T> {
+  const timer = setInterval(() => {
+    void chrome.runtime.getPlatformInfo().catch(() => {})
+  }, 20_000)
+  return p.finally(() => clearInterval(timer))
+}
+
 let openingWindow = false
 async function openWalletWindow() {
   if (openingWindow) return
@@ -552,7 +598,7 @@ async function handlePrivateSwapRequest(
   // request BEFORE opening so the popup finds it immediately after unlock.
   const decision = requestSwapApproval(origin, params, 180_000)
   await openWalletWindow()
-  const approved = await decision
+  const approved = await withKeepAlive(decision)
   if (!approved) return { success: false, error: "rejected" }
 
   return handlePrivateSwap(params)
