@@ -307,10 +307,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === "PRIVATE_SWAP") {
-    // A spend: authorized sender + explicit per-request approval, both required.
-    handlePrivateSwapRequest(message.params, sender)
-      .then(sendResponse)
+    // Fire-and-poll: authorize, START the swap job, and respond IMMEDIATELY.
+    // The page then polls GET_SWAP_STATUS, and that polling is what keeps the
+    // MV3 worker alive through the approval + the ~2-3 min swap — a single held
+    // response can't (the setInterval keep-alive is unreliable in a service
+    // worker, so the worker was evicted mid-swap: "message channel closed").
+    isAuthorizedSender(sender)
+      .then((ok) => {
+        if (!ok) return sendResponse({ success: false, error: "not authorized" })
+        void setSwapJob({ status: "pending" })
+        void runSwapJob(message.params, sender)
+        sendResponse({ success: true, pending: true })
+      })
       .catch((err) => sendResponse({ success: false, error: err.message }))
+    return true
+  }
+
+  if (message.type === "GET_SWAP_STATUS") {
+    isAuthorizedSender(sender)
+      .then((ok) => {
+        if (!ok) return sendResponse(null)
+        chrome.storage.session
+          .get("swapJob")
+          .then((r) => sendResponse(r.swapJob ?? null))
+          .catch(() => sendResponse(null))
+      })
+      .catch(() => sendResponse(null))
     return true
   }
 
@@ -579,32 +601,54 @@ function requestSwapApproval(
 // Page-facing entry: authorize the caller, get explicit per-request approval,
 // then execute. No spend happens without BOTH an approved origin AND a fresh
 // user confirmation of the exact amount + output token.
-async function handlePrivateSwapRequest(
+// Swap job status, persisted so the page can poll it (GET_SWAP_STATUS) even
+// across worker restarts. One swap at a time.
+interface SwapJob {
+  status: "pending" | "done" | "error"
+  result?: unknown
+  error?: string
+}
+async function setSwapJob(job: SwapJob): Promise<void> {
+  await chrome.storage.session.set({ swapJob: job }).catch(() => {})
+}
+
+// Run the swap as a background job, writing status to storage for the page to
+// poll. No held response and no reliance on a keep-alive timer: the page's
+// GET_SWAP_STATUS polling is what keeps the worker alive through the approval +
+// the ~2-3 min swap.
+async function runSwapJob(
   params: SwapRequestParams,
   sender: chrome.runtime.MessageSender
-): Promise<{ success: boolean; data?: unknown; error?: string }> {
-  if (!(await isAuthorizedSender(sender))) {
-    return { success: false, error: "not authorized" }
+): Promise<void> {
+  try {
+    const origin = senderOrigin(sender)
+    if (!origin) {
+      await setSwapJob({ status: "error", error: "unknown origin" })
+      return
+    }
+    if (
+      !params ||
+      typeof params.outputMint !== "string" ||
+      typeof params.amountLamports !== "string"
+    ) {
+      await setSwapJob({ status: "error", error: "invalid params" })
+      return
+    }
+    const decision = requestSwapApproval(origin, params, 180_000)
+    await openWalletWindow()
+    const approved = await decision
+    if (!approved) {
+      await setSwapJob({ status: "error", error: "rejected" })
+      return
+    }
+    const result = await handlePrivateSwap(params)
+    await setSwapJob({ status: "done", result: result.data })
+  } catch (e) {
+    await setSwapJob({
+      status: "error",
+      error: e instanceof Error ? e.message : String(e)
+    })
   }
-  const origin = senderOrigin(sender)
-  if (!origin) return { success: false, error: "unknown origin" }
-  if (!params || typeof params.outputMint !== "string" || typeof params.amountLamports !== "string") {
-    return { success: false, error: "invalid params" }
-  }
-
-  // Show the approval window (the popup requires unlock before it renders the
-  // approval, so a locked wallet can never auto-approve). Register the pending
-  // request BEFORE opening so the popup finds it immediately after unlock.
-  const decision = requestSwapApproval(origin, params, 180_000)
-  await openWalletWindow()
-  const approved = await withKeepAlive(decision)
-  if (!approved) return { success: false, error: "rejected" }
-
-  // Keep the worker alive across the whole swap (withdraw settlement + Jupiter,
-  // up to ~2-3 min), not just the approval — otherwise the worker is evicted
-  // mid-swap, the held response is dropped ("message channel closed"), and the
-  // swap is cut off before it can finish and persist its output.
-  return withKeepAlive(handlePrivateSwap(params))
 }
 
 // The actual spend. Runs only after handlePrivateSwapRequest approved it.

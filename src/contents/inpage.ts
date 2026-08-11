@@ -45,7 +45,7 @@ if (!(window as any).paraloom) {
   ;(window as any).paraloom = {
     // Version marker so we can confirm from the page console which build is
     // actually injected (two extensions or a stale one caused confusion).
-    __version: "1.5.4",
+    __version: "1.5.5",
     connect: async () => {
       // Trigger the approval flow, but do NOT depend on this call's held
       // response. The background holds it across the user's approval; an MV3
@@ -87,9 +87,23 @@ if (!(window as any).paraloom) {
       amountLamports: string
       slippageBps?: number
     }) => {
-      const r = await relay("PRIVATE_SWAP", { params })
-      if (r?.success) return r.data
-      throw new Error(r?.error || "Private swap failed")
+      // Kick off the swap job (opens the approval popup), then POLL its status.
+      // The polling keeps the MV3 worker alive through the approval + the
+      // ~2-3 min swap; a single held response could not (worker eviction dropped
+      // it as "message channel closed").
+      const ack = await relay("PRIVATE_SWAP", { params }).catch(() => null)
+      if (ack && ack.success === false) {
+        throw new Error(ack.error || "Private swap failed")
+      }
+      for (let i = 0; i < 200; i++) {
+        await new Promise((res) => setTimeout(res, 1500))
+        const st = await relay("GET_SWAP_STATUS").catch(() => null)
+        if (st?.status === "done") return st.result
+        if (st?.status === "error") {
+          throw new Error(st.error || "Private swap failed")
+        }
+      }
+      throw new Error("Private swap timed out")
     },
     getAddress: async () => {
       const r = await relay("GET_ADDRESS")
