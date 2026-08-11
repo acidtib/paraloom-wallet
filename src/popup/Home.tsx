@@ -76,7 +76,7 @@ export function Home({ onLock }: HomeProps) {
   const [transferring, setTransferring] = useState(false)
 
   // Settings state
-  const [network, setNetworkState] = useState<"mainnet-beta" | "devnet">("devnet")
+  const [network, setNetworkState] = useState<"mainnet-beta" | "devnet">("mainnet-beta")
   const [autoLock, setAutoLock] = useState(15)
   const [autoLockOpen, setAutoLockOpen] = useState(false)
   const [showPKModal, setShowPKModal] = useState(false)
@@ -409,11 +409,9 @@ export function Home({ onLock }: HomeProps) {
   }
 
   async function handleNetworkChange(net: "mainnet-beta" | "devnet") {
-    // Mainnet is locked until the Paraloom network goes live.
-    if (net === "mainnet-beta") return
     setNetworkState(net)
     await saveNetwork(net)
-    showToast("Switched to Devnet", "success")
+    showToast(net === "mainnet-beta" ? "Switched to Mainnet Beta" : "Switched to Devnet", "success")
   }
 
   async function handleAutoLockChange(minutes: number) {
@@ -712,6 +710,16 @@ export function Home({ onLock }: HomeProps) {
               <div className="settings-section-title">Network</div>
               <div className="network-options">
                 <div
+                  className={`network-option ${network === "mainnet-beta" ? "active" : ""}`}
+                  onClick={() => handleNetworkChange("mainnet-beta")}
+                >
+                  <div className="network-dot" />
+                  <div className="network-info">
+                    <div className="network-name">Mainnet Beta</div>
+                    <div className="network-url">node.paraloom.io</div>
+                  </div>
+                </div>
+                <div
                   className={`network-option ${network === "devnet" ? "active" : ""}`}
                   onClick={() => handleNetworkChange("devnet")}
                 >
@@ -720,14 +728,6 @@ export function Home({ onLock }: HomeProps) {
                     <div className="network-name">Devnet</div>
                     <div className="network-url">api.devnet.solana.com</div>
                   </div>
-                </div>
-                <div className="network-option network-option--disabled" aria-disabled="true">
-                  <div className="network-dot" />
-                  <div className="network-info">
-                    <div className="network-name">Mainnet Beta</div>
-                    <div className="network-url">Available at mainnet launch</div>
-                  </div>
-                  <span className="network-soon">Soon</span>
                 </div>
               </div>
             </div>

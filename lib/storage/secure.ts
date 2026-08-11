@@ -149,8 +149,11 @@ export async function updateAccounts(accounts: Account[]): Promise<void> {
 }
 
 export async function getNetwork(): Promise<"mainnet-beta" | "devnet"> {
-  // Mainnet is locked pre-launch, so devnet is the only selectable network.
-  return "devnet"
+  // Mainnet is live (capped beta). New installs default to mainnet-beta;
+  // a previously stored choice (e.g. devnet for testing) is honoured.
+  const result = await chrome.storage.local.get(STORAGE_KEY)
+  const storage = result[STORAGE_KEY] as WalletStorage | undefined
+  return storage?.network ?? "mainnet-beta"
 }
 
 export async function setNetwork(network: "mainnet-beta" | "devnet"): Promise<void> {
