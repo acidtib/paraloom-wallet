@@ -13,6 +13,7 @@ import { transfer } from "~lib/paraloom/transfer"
 import { depositV3, spendV3 } from "~lib/paraloom/transactFlow"
 import { addressBoxPubHex } from "~lib/crypto/keyManagement"
 import { scanForNotes } from "~lib/paraloom/scan"
+import { listSwapOutputs, type SwapOutput } from "~lib/paraloom/swapOutputs"
 import { QRCodeSVG } from "qrcode.react"
 
 import logoImg from "data-base64:~/../assets/icon.png"
@@ -66,6 +67,7 @@ export function Home({ onLock }: HomeProps) {
   const [depositAmount, setDepositAmount] = useState("")
   const [depositing, setDepositing] = useState(false)
   const [notes, setNotes] = useState<ShieldedNote[]>([])
+  const [swapOutputs, setSwapOutputs] = useState<SwapOutput[]>([])
   const [showWithdrawModal, setShowWithdrawModal] = useState(false)
   const [withdrawAddress, setWithdrawAddress] = useState("")
   const [withdrawing, setWithdrawing] = useState(false)
@@ -98,6 +100,12 @@ export function Home({ onLock }: HomeProps) {
     getAutoLockMinutes().then(setAutoLock)
     getApprovedOrigins().then(setConnectedSites)
   }, [])
+
+  // Load the private-swap outputs (tokens bought at fresh unlinkable addresses);
+  // refresh when the Activity tab is opened.
+  useEffect(() => {
+    listSwapOutputs().then(setSwapOutputs).catch(() => {})
+  }, [bottomTab])
 
   // Refresh the connected-sites list whenever the Settings tab is opened.
   useEffect(() => {
@@ -653,54 +661,106 @@ export function Home({ onLock }: HomeProps) {
           </>
         ) : bottomTab === "activity" ? (
           <div className="activity-content">
-            {notes.length === 0 ? (
-              <div className="empty-state">
-                <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.2">
-                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                  <polyline points="14 2 14 8 20 8"></polyline>
-                  <line x1="16" y1="13" x2="8" y2="13"></line>
-                  <line x1="16" y1="17" x2="8" y2="17"></line>
-                  <polyline points="10 9 9 9 8 9"></polyline>
-                </svg>
-                <div className="empty-title">No Activity Yet</div>
-                <div className="empty-subtitle">Your transaction history will appear here</div>
-              </div>
-            ) : (
-              <div className="activity-list">
-                {notes.map((n) => (
-                  <a
-                    key={n.signature}
-                    className="activity-item"
-                    href={`https://explorer.solana.com/tx/${n.signature}?cluster=${network}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    title="View on Solana Explorer"
-                  >
-                    <div className="activity-icon">
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <path d="M12 2v13"></path>
-                        <polyline points="6 9 12 15 18 9"></polyline>
-                        <line x1="5" y1="21" x2="19" y2="21"></line>
-                      </svg>
+            {(() => {
+              // Only real deposits belong in the activity list. The zero-value
+              // change/filler notes a transact emits carry an empty signature,
+              // so rendering them all under key="" collided React keys (items
+              // drew on top of each other) and showed bogus "+0.0000 SOL" rows.
+              const deposits = notes.filter(
+                (n) => n.source === "deposit" && Number(n.amount) > 0
+              )
+              return deposits.length === 0 && swapOutputs.length === 0 ? (
+                <div className="empty-state">
+                  <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.2">
+                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                    <polyline points="14 2 14 8 20 8"></polyline>
+                    <line x1="16" y1="13" x2="8" y2="13"></line>
+                    <line x1="16" y1="17" x2="8" y2="17"></line>
+                    <polyline points="10 9 9 9 8 9"></polyline>
+                  </svg>
+                  <div className="empty-title">No Activity Yet</div>
+                  <div className="empty-subtitle">Your transaction history will appear here</div>
+                </div>
+              ) : (
+                <>
+                  {swapOutputs.length > 0 && (
+                    <div className="activity-list" style={{ marginBottom: 16 }}>
+                      <div className="empty-subtitle" style={{ marginBottom: 4 }}>Private buys</div>
+                      {swapOutputs.map((s, i) => (
+                        <a
+                          key={s.swapSignature || i}
+                          className="activity-item"
+                          href={`https://solscan.io/tx/${s.swapSignature}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          title="View on Solscan"
+                        >
+                          <div className="activity-icon">
+                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <polyline points="17 1 21 5 17 9"></polyline>
+                              <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+                              <polyline points="7 23 3 19 7 15"></polyline>
+                              <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+                            </svg>
+                          </div>
+                          <div className="activity-info">
+                            <div className="activity-row">
+                              <span className="activity-title">Private buy</span>
+                              <span className="activity-amount">
+                                {(s.outAmount / 1e6).toFixed(4)}{" "}
+                                {s.outputMint === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" ? "USDC" : "token"}
+                              </span>
+                            </div>
+                            <div className="activity-row">
+                              <span className="activity-sub">
+                                <span className="activity-status">at</span>
+                                <span className="activity-dot">·</span>
+                                {s.freshAddress.slice(0, 4)}…{s.freshAddress.slice(-4)}
+                              </span>
+                              <span className="activity-sig">{timeAgo(s.createdAt)}</span>
+                            </div>
+                          </div>
+                        </a>
+                      ))}
                     </div>
-                    <div className="activity-info">
-                      <div className="activity-row">
-                        <span className="activity-title">Deposit</span>
-                        <span className="activity-amount">+{(Number(n.amount) / 1e9).toFixed(4)} SOL</span>
-                      </div>
-                      <div className="activity-row">
-                        <span className="activity-sub">
-                          <span className="activity-status">Confirmed</span>
-                          <span className="activity-dot">·</span>
-                          {timeAgo(n.createdAt)}
-                        </span>
-                        <span className="activity-sig">{shortSig(n.signature)}</span>
-                      </div>
-                    </div>
-                  </a>
-                ))}
-              </div>
-            )}
+                  )}
+                  <div className="activity-list">
+                    {deposits.map((n, i) => (
+                      <a
+                        key={n.signature || n.commitment || i}
+                        className="activity-item"
+                        href={`https://explorer.solana.com/tx/${n.signature}?cluster=${network}`}
+                        target="_blank"
+                        rel="noreferrer"
+                        title="View on Solana Explorer"
+                      >
+                        <div className="activity-icon">
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <path d="M12 2v13"></path>
+                            <polyline points="6 9 12 15 18 9"></polyline>
+                            <line x1="5" y1="21" x2="19" y2="21"></line>
+                          </svg>
+                        </div>
+                        <div className="activity-info">
+                          <div className="activity-row">
+                            <span className="activity-title">Deposit</span>
+                            <span className="activity-amount">+{(Number(n.amount) / 1e9).toFixed(4)} SOL</span>
+                          </div>
+                          <div className="activity-row">
+                            <span className="activity-sub">
+                              <span className="activity-status">Confirmed</span>
+                              <span className="activity-dot">·</span>
+                              {timeAgo(n.createdAt)}
+                            </span>
+                            <span className="activity-sig">{shortSig(n.signature)}</span>
+                          </div>
+                        </div>
+                      </a>
+                    ))}
+                  </div>
+                </>
+              )
+            })()}
           </div>
         ) : (
           /* ─── Settings Tab ─── */
