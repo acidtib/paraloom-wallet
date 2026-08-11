@@ -45,7 +45,7 @@ if (!(window as any).paraloom) {
   ;(window as any).paraloom = {
     // Version marker so we can confirm from the page console which build is
     // actually injected (two extensions or a stale one caused confusion).
-    __version: "1.5.5",
+    __version: "1.5.6",
     connect: async () => {
       // Trigger the approval flow, but do NOT depend on this call's held
       // response. The background holds it across the user's approval; an MV3
