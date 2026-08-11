@@ -22,6 +22,7 @@ import {
 
 import { SWAP_ROUTER_URL } from "./constants"
 import type { ShieldedNote } from "./notes"
+import { saveSwapOutput } from "./swapOutputs"
 import { spendV3 } from "./transactFlow"
 
 /** Lamports left at the fresh address to cover the swap's own costs: the output
@@ -178,6 +179,21 @@ export async function privateSwap(
   const swapSignature = await connection.sendRawTransaction(tx.serialize(), {
     maxRetries: 5
   })
+
+  // Persist the fresh key + output NOW, the instant the swap is submitted and
+  // BEFORE waiting for confirmation. The bought token lives at this fresh
+  // address and is only spendable with this key, so it must never be lost to a
+  // later throw (a confirm timeout used to strand it). Saving here also makes it
+  // show up under "Private buys" immediately.
+  await saveSwapOutput({
+    freshAddress: fresh.publicKey.toBase58(),
+    freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    outputMint: params.outputMint,
+    outAmount: out_amount,
+    swapSignature,
+    createdAt: Date.now()
+  })
+
   // Poll the signature status rather than connection.confirmTransaction, whose
   // 30s deadline throws "not confirmed in 30 seconds" on a busy mainnet even
   // when the swap actually lands. We wait up to ~90s and only fail on a real

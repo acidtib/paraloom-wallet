@@ -7,7 +7,6 @@ import { getNotes, shieldedBalance, type ShieldedNote } from "~lib/paraloom/note
 import { scanForNotes } from "~lib/paraloom/scan"
 import { solanaAddress } from "~lib/paraloom/bridge"
 import { privateSwap } from "~lib/paraloom/privateSwap"
-import { saveSwapOutput } from "~lib/paraloom/swapOutputs"
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 
 // Private swaps are mainnet-only (Jupiter liquidity) and rebuilding the v3 tree
@@ -637,16 +636,9 @@ async function handlePrivateSwap(
     }
   )
 
-  // Persist the fresh key so the bought token is recoverable — it never leaves
-  // the wallet, and is NOT returned to the page.
-  await saveSwapOutput({
-    freshAddress: result.freshAddress,
-    freshSecretKeyHex: Buffer.from(result.freshSecretKey).toString("hex"),
-    outputMint: params.outputMint,
-    outAmount: result.outAmount,
-    swapSignature: result.swapSignature,
-    createdAt: Date.now()
-  })
+  // The fresh key + output are persisted inside privateSwap the instant the swap
+  // is submitted (before confirmation), so a late failure can never strand the
+  // bought token — nothing to save again here.
   void recordActivity(Date.now())
 
   return {
