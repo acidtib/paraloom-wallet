@@ -2,6 +2,17 @@
 /* eslint-disable */
 
 /**
+ * Derive the shielded-asset field element for an SPL `mint` (#779):
+ * `Poseidon(2)` over the mint's two 16-byte little-endian halves. Matches the
+ * on-chain `merkle_tree::mint_to_asset` exactly, so a wallet-built SPL note or
+ * transact proof carries the same `asset_id` the program derives from the mint
+ * account. Native SOL keeps the all-zero asset and never calls this.
+ *
+ * `mint_hex` is the 32-byte mint pubkey, hex. Returns the 32-byte asset id, hex.
+ */
+export function mint_to_asset(mint_hex: string): string;
+
+/**
  * Poseidon commitment for a note `(amount, randomness, recipient)`, hex. The
  * wallet needs this to look up the note's Merkle path from the path server.
  */
@@ -38,7 +49,7 @@ export function note_commitment_v2(amount: bigint, privkey_hex: string, blinding
  * Returns `{ nullifiers: [hex, hex], output_commitments: [hex, hex], proof }`
  * — with `root`/`ext_amount`/`recipient`, exactly the transact-ingress body.
  */
-export function prove_transact(proving_key: Uint8Array, root_hex: string, ext_amount: bigint, recipient_hex: string, inputs_json: string, outputs_json: string): string;
+export function prove_transact(proving_key: Uint8Array, root_hex: string, ext_amount: bigint, recipient_hex: string, asset_id_hex: string, inputs_json: string, outputs_json: string): string;
 
 /**
  * Build a shielded → shielded transfer proof with the spend-key construction
@@ -127,9 +138,10 @@ export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembl
 
 export interface InitOutput {
     readonly memory: WebAssembly.Memory;
+    readonly mint_to_asset: (a: number, b: number) => [number, number, number, number];
     readonly note_commitment: (a: bigint, b: number, c: number, d: number, e: number) => [number, number, number, number];
     readonly note_commitment_v2: (a: bigint, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
-    readonly prove_transact: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: number) => [number, number, number, number];
+    readonly prove_transact: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number) => [number, number, number, number];
     readonly prove_transfer_v2: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number, i: number, j: number) => [number, number, number, number];
     readonly prove_withdrawal_v2: (a: number, b: number, c: number, d: number, e: bigint, f: number, g: number, h: number, i: number, j: number, k: number, l: number, m: number, n: number, o: number, p: number, q: number) => [number, number, number, number];
     readonly spend_pubkey: (a: number, b: number) => [number, number, number, number];

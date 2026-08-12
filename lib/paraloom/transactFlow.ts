@@ -216,6 +216,7 @@ export async function spendV3(
     rootHex,
     extAmount,
     recipientHex,
+    NATIVE_ASSET_HEX,
     [inputSpecs[0], inputSpecs[1]] as never,
     [outputs[0], outputs[1]] as never
   )

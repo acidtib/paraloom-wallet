@@ -12,11 +12,17 @@ import { addressSpendPubHex, type WalletKeyPair } from "~lib/crypto/keyManagemen
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 
 import {
+  ASSET_CONFIG_SEED,
+  ASSET_VAULT_SEED,
+  ASSOCIATED_TOKEN_PROGRAM_ID,
   BRIDGE_STATE_SEED,
   BRIDGE_VAULT_SEED,
   DEPOSIT_DISCRIMINATOR,
+  DEPOSIT_NOTE_SPL_DISCRIMINATOR,
+  MERKLE_TREE_SEED,
   PROGRAM_ID,
-  RPC_URLS
+  RPC_URLS,
+  TOKEN_PROGRAM_ID
 } from "./constants"
 
 export type Network = "mainnet-beta" | "devnet"
@@ -81,6 +87,119 @@ export interface DepositResult {
   blinding: Uint8Array
   assetId: string // hex, 32 bytes (all-zero = native SOL)
   amount: bigint
+}
+
+// ---- SPL re-shield (#779) --------------------------------------------------
+
+function merkleTreePda(): PublicKey {
+  return PublicKey.findProgramAddressSync([Buffer.from(MERKLE_TREE_SEED)], programId)[0]
+}
+
+function assetVaultPda(mint: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from(ASSET_VAULT_SEED), mint.toBytes()],
+    programId
+  )[0]
+}
+
+function assetConfigPda(mint: PublicKey): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [Buffer.from(ASSET_CONFIG_SEED), mint.toBytes()],
+    programId
+  )[0]
+}
+
+// The associated token account of `owner` for `mint`, derived without
+// @solana/spl-token (the extension bundles only web3.js): ATA =
+// findProgramAddress([owner, tokenProgram, mint], associatedTokenProgram).
+export function associatedTokenAddress(
+  owner: PublicKey,
+  mint: PublicKey,
+  tokenProgram: PublicKey = new PublicKey(TOKEN_PROGRAM_ID)
+): PublicKey {
+  return PublicKey.findProgramAddressSync(
+    [owner.toBytes(), tokenProgram.toBytes(), mint.toBytes()],
+    new PublicKey(ASSOCIATED_TOKEN_PROGRAM_ID)
+  )[0]
+}
+
+// Layout: DEPOSIT_NOTE_SPL discriminator (8) | amount u64 LE (8) | pubkey (32) |
+// blinding (32) — identical arg shape to deposit_note, just the SPL variant.
+function depositSplInstructionData(
+  amount: bigint,
+  pubkey: Uint8Array,
+  blinding: Uint8Array
+): Buffer {
+  const data = new Uint8Array(8 + 8 + 32 + 32)
+  data.set(DEPOSIT_NOTE_SPL_DISCRIMINATOR, 0)
+  new DataView(data.buffer).setBigUint64(8, amount, true)
+  data.set(pubkey, 16)
+  data.set(blinding, 48)
+  return Buffer.from(data)
+}
+
+// Build a `deposit_note_spl` instruction. Account order mirrors the on-chain
+// DepositNoteSpl struct exactly: bridge_state, asset_config, mint, asset_vault,
+// depositor_token_account, merkle_tree, depositor, token_program.
+export function buildDepositSplInstruction(
+  depositor: PublicKey,
+  mint: PublicKey,
+  depositorTokenAccount: PublicKey,
+  amount: bigint,
+  pubkey: Uint8Array,
+  blinding: Uint8Array,
+  tokenProgram: PublicKey = new PublicKey(TOKEN_PROGRAM_ID)
+): TransactionInstruction {
+  return new TransactionInstruction({
+    programId,
+    keys: [
+      { pubkey: bridgeStatePda(), isSigner: false, isWritable: false },
+      { pubkey: assetConfigPda(mint), isSigner: false, isWritable: true },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: assetVaultPda(mint), isSigner: false, isWritable: true },
+      { pubkey: depositorTokenAccount, isSigner: false, isWritable: true },
+      { pubkey: merkleTreePda(), isSigner: false, isWritable: true },
+      { pubkey: depositor, isSigner: true, isWritable: true },
+      { pubkey: tokenProgram, isSigner: false, isWritable: false }
+    ],
+    data: depositSplInstructionData(amount, pubkey, blinding)
+  })
+}
+
+// Re-shield `amount` base units of `mint` held at `depositor`'s associated
+// token account into the shielded pool, crediting the wallet's own shielded
+// address. `depositor` is the (fresh) keypair that owns the tokens (e.g. a
+// private-swap output address). The blinding is returned so the caller can
+// persist the note for a later SPL spend. `assetId` is `mint_to_asset(mint)`.
+export async function depositSpl(
+  connection: Connection,
+  depositor: Keypair,
+  wallet: WalletKeyPair,
+  mint: PublicKey,
+  amount: bigint,
+  assetId: string,
+  tokenProgram: PublicKey = new PublicKey(TOKEN_PROGRAM_ID)
+): Promise<DepositResult> {
+  const recipient = hexToBytes(addressSpendPubHex(wallet.shieldedAddress))
+  const blinding = new Uint8Array(32)
+  crypto.getRandomValues(blinding)
+
+  const ata = associatedTokenAddress(depositor.publicKey, mint, tokenProgram)
+  const ix = buildDepositSplInstruction(
+    depositor.publicKey,
+    mint,
+    ata,
+    amount,
+    recipient,
+    blinding,
+    tokenProgram
+  )
+  const tx = new Transaction().add(ix)
+  const signature = await sendAndConfirmTransaction(connection, tx, [depositor], {
+    commitment: "confirmed"
+  })
+
+  return { signature, blinding, assetId, amount }
 }
 
 function hexToBytes(hex: string): Uint8Array {
