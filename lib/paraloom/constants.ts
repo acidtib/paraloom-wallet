@@ -18,6 +18,12 @@ export const DEPOSIT_NOTE_SPL_DISCRIMINATOR = new Uint8Array([
 // sha256("event:DepositNoteEvent")[..8] / sha256("event:TransactEvent")[..8] —
 // the program events the wallet scans to rebuild the v3 tree client-side.
 export const DEPOSIT_NOTE_EVENT_DISCRIMINATOR = new Uint8Array([85, 20, 187, 76, 92, 196, 249, 195])
+// #779: sha256("event:DepositNoteSplEvent")[..8]. SPL deposits append to the
+// SAME tree as native, so their leaves must be included when rebuilding it, or
+// the tree diverges from on-chain and every spend (native included) freezes.
+export const DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR = new Uint8Array([
+  229, 33, 39, 208, 18, 5, 237, 1
+])
 export const TRANSACT_EVENT_DISCRIMINATOR = new Uint8Array([89, 245, 87, 250, 222, 30, 135, 142])
 
 // PDA seeds.

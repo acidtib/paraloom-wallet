@@ -11,6 +11,7 @@ import init, {
   spend_pubkey,
   v3_merkle_path,
   v3_note_commitment,
+  v3_note_commitment_asset,
   v3_note_pubkey
 } from "./paraloom_prover_wasm.js"
 import wasmUrl from "url:./paraloom_prover_wasm_bg.wasm"
@@ -183,6 +184,18 @@ export async function v3NoteCommitment(
 ): Promise<string> {
   await ensureInit()
   return v3_note_commitment(amount, pubkeyHex, blindingHex)
+}
+
+// Asset-aware v3 commitment (#779): pass the note's assetId (all-zero for native
+// SOL, or `assetIdForMint(mint)` for a shielded SPL note) to locate its leaf.
+export async function v3NoteCommitmentAsset(
+  amount: bigint,
+  pubkeyHex: string,
+  blindingHex: string,
+  assetIdHex: string
+): Promise<string> {
+  await ensureInit()
+  return v3_note_commitment_asset(amount, pubkeyHex, blindingHex, assetIdHex)
 }
 
 // Rebuild the v3 tree from the ordered leaf list (public on-chain events) and

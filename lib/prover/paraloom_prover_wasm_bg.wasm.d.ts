@@ -10,6 +10,7 @@ export const prove_withdrawal_v2: (a: number, b: number, c: number, d: number, e
 export const spend_pubkey: (a: number, b: number) => [number, number, number, number];
 export const v3_merkle_path: (a: number, b: number, c: number) => [number, number, number, number];
 export const v3_note_commitment: (a: bigint, b: number, c: number, d: number, e: number) => [number, number, number, number];
+export const v3_note_commitment_asset: (a: bigint, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
 export const v3_note_pubkey: (a: number, b: number) => [number, number, number, number];
 export const __wbindgen_exn_store: (a: number) => void;
 export const __externref_table_alloc: () => number;

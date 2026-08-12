@@ -130,6 +130,14 @@ export function v3_merkle_path(leaves_json: string, leaf_index: number): string;
 export function v3_note_commitment(amount: bigint, pubkey_hex: string, blinding_hex: string): string;
 
 /**
+ * The v3 note commitment for an arbitrary asset (#779): identical to
+ * [`v3_note_commitment`] but takes the note's `asset_id` (all-zero for native
+ * SOL, or `mint_to_asset(mint)` for a shielded SPL note) instead of assuming
+ * native. Used to locate a shielded SPL note's leaf in the on-chain tree.
+ */
+export function v3_note_commitment_asset(amount: bigint, pubkey_hex: string, blinding_hex: string, asset_id_hex: string): string;
+
+/**
  * Derive the v3 spend public key `Poseidon1(privkey)` (circom Poseidon).
  */
 export function v3_note_pubkey(privkey_hex: string): string;
@@ -147,6 +155,7 @@ export interface InitOutput {
     readonly spend_pubkey: (a: number, b: number) => [number, number, number, number];
     readonly v3_merkle_path: (a: number, b: number, c: number) => [number, number, number, number];
     readonly v3_note_commitment: (a: bigint, b: number, c: number, d: number, e: number) => [number, number, number, number];
+    readonly v3_note_commitment_asset: (a: bigint, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number, number];
     readonly v3_note_pubkey: (a: number, b: number) => [number, number, number, number];
     readonly __wbindgen_exn_store: (a: number) => void;
     readonly __externref_table_alloc: () => number;
