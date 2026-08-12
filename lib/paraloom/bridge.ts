@@ -167,20 +167,20 @@ export function buildDepositSplInstruction(
 }
 
 // Re-shield `amount` base units of `mint` held at `depositor`'s associated
-// token account into the shielded pool, crediting the wallet's own shielded
-// address. `depositor` is the (fresh) keypair that owns the tokens (e.g. a
-// private-swap output address). The blinding is returned so the caller can
-// persist the note for a later SPL spend. `assetId` is `mint_to_asset(mint)`.
+// token account into the shielded pool, crediting `shieldedAddress`. `depositor`
+// is the (fresh) keypair that owns the tokens (e.g. a private-swap output
+// address). The blinding is returned so the caller can persist the note for a
+// later SPL spend. `assetId` is `mint_to_asset(mint)`.
 export async function depositSpl(
   connection: Connection,
   depositor: Keypair,
-  wallet: WalletKeyPair,
+  shieldedAddress: string,
   mint: PublicKey,
   amount: bigint,
   assetId: string,
   tokenProgram: PublicKey = new PublicKey(TOKEN_PROGRAM_ID)
 ): Promise<DepositResult> {
-  const recipient = hexToBytes(addressSpendPubHex(wallet.shieldedAddress))
+  const recipient = hexToBytes(addressSpendPubHex(shieldedAddress))
   const blinding = new Uint8Array(32)
   crypto.getRandomValues(blinding)
 
