@@ -3,7 +3,7 @@ import { Connection } from "@solana/web3.js"
 import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
 import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
-import { getNotes, shieldedBalance, type ShieldedNote } from "~lib/paraloom/notes"
+import { addNote, getNotes, shieldedBalance, type ShieldedNote } from "~lib/paraloom/notes"
 import { scanForNotes } from "~lib/paraloom/scan"
 import { solanaAddress } from "~lib/paraloom/bridge"
 import { privateSwap } from "~lib/paraloom/privateSwap"
@@ -71,6 +71,9 @@ interface SwapRequestParams {
   /** lamports as a decimal string (BigInt doesn't cross the message bridge). */
   amountLamports: string
   slippageBps?: number
+  /** Round trip (#779): re-shield the swapped token instead of leaving it at
+   *  the fresh address. Ignored for a "SOL" output. */
+  reshield?: boolean
 }
 let pendingSwap:
   | {
@@ -680,7 +683,8 @@ async function handlePrivateSwap(
     {
       outputMint: params.outputMint,
       amountLamports: amount,
-      slippageBps: params.slippageBps ?? 100
+      slippageBps: params.slippageBps ?? 100,
+      reshield: params.reshield ?? false
     }
   )
 
@@ -689,12 +693,29 @@ async function handlePrivateSwap(
   // bought token — nothing to save again here.
   void recordActivity(Date.now())
 
+  // A successful round trip (#779) returns the shielded SPL note; record it so
+  // the shielded balance reflects it. The note is a deposit (non-empty
+  // signature, no commitment); scanning DepositNoteSplEvent later fills its
+  // leafIndex for spending, exactly as native deposit notes are resolved.
+  if (result.reshielded) {
+    await addNote(shieldedAddress, {
+      amount: result.reshielded.amount,
+      blinding: result.reshielded.blindingHex,
+      assetId: result.reshielded.assetId,
+      signature: result.reshielded.depositSignature,
+      createdAt: Date.now(),
+      spent: false,
+      source: "deposit"
+    })
+  }
+
   return {
     success: true,
     data: {
       freshAddress: result.freshAddress,
       swapSignature: result.swapSignature,
-      outAmount: result.outAmount
+      outAmount: result.outAmount,
+      reshielded: result.reshielded !== undefined
     }
   }
 }

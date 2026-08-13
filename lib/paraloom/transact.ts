@@ -23,6 +23,7 @@ import {
   BRIDGE_VAULT_SEED,
   DEPOSIT_NOTE_DISCRIMINATOR,
   DEPOSIT_NOTE_EVENT_DISCRIMINATOR,
+  DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR,
   MERKLE_TREE_SEED,
   PROGRAM_ID,
   TRANSACT_EVENT_DISCRIMINATOR,
@@ -187,6 +188,18 @@ export async function fetchV3Leaves(connection: Connection): Promise<V3Leaf[]> {
         const body = payload.slice(8)
         const commitment = body.slice(40, 72)
         const leafIndex = Number(new DataView(body.buffer, body.byteOffset + 72, 8).getBigUint64(0, true))
+        leaves.push({ index: leafIndex, commitmentHex: Buffer.from(commitment).toString("hex") })
+        transactLeafCursor = Math.max(transactLeafCursor ?? 0, leafIndex + 1)
+      } else if (startsWith(payload, DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR)) {
+        // SPL deposit (#779): same tree, one extra `mint` (32) field before the
+        // commitment. Body: depositor(32) | mint(32) | amount(8) | commitment(32)
+        // | leaf_index(8) | timestamp(8). Its leaf MUST be included or the tree
+        // diverges from on-chain and every spend freezes.
+        const body = payload.slice(8)
+        const commitment = body.slice(72, 104)
+        const leafIndex = Number(
+          new DataView(body.buffer, body.byteOffset + 104, 8).getBigUint64(0, true)
+        )
         leaves.push({ index: leafIndex, commitmentHex: Buffer.from(commitment).toString("hex") })
         transactLeafCursor = Math.max(transactLeafCursor ?? 0, leafIndex + 1)
       } else if (startsWith(payload, TRANSACT_EVENT_DISCRIMINATOR)) {

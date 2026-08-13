@@ -6,7 +6,13 @@
 import { Connection, Keypair } from "@solana/web3.js"
 
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
-import { proveTransact, v3MerklePath, v3NoteCommitment, v3NotePubkey } from "~lib/prover"
+import {
+  proveTransact,
+  v3MerklePath,
+  v3NoteCommitment,
+  v3NoteCommitmentAsset,
+  v3NotePubkey
+} from "~lib/prover"
 
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { encryptNote } from "./noteCrypto"
@@ -82,7 +88,13 @@ async function ensureLeafIndex(
 ): Promise<number> {
   if (note.leafIndex !== undefined && note.leafIndex >= 0) return note.leafIndex
   const pubkeyHex = await v3NotePubkey(spendPrivkeyHex)
-  const commitment = await v3NoteCommitment(BigInt(note.amount), pubkeyHex, note.blinding)
+  // Compute the commitment under the note's own asset (#779): a shielded SPL
+  // note's leaf binds its mint-derived assetId, not the native all-zero one, so
+  // a native-only commitment would never match its on-chain leaf.
+  const commitment =
+    note.assetId && note.assetId !== NATIVE_ASSET_HEX
+      ? await v3NoteCommitmentAsset(BigInt(note.amount), pubkeyHex, note.blinding, note.assetId)
+      : await v3NoteCommitment(BigInt(note.amount), pubkeyHex, note.blinding)
   const leaves = await fetchV3Leaves(connection)
   const idx = leaves.findIndex((l) => l.commitmentHex === commitment)
   if (idx < 0) throw new Error("note commitment not found in the on-chain tree")
@@ -216,6 +228,7 @@ export async function spendV3(
     rootHex,
     extAmount,
     recipientHex,
+    NATIVE_ASSET_HEX,
     [inputSpecs[0], inputSpecs[1]] as never,
     [outputs[0], outputs[1]] as never
   )

@@ -10,15 +10,34 @@ export const DEPOSIT_DISCRIMINATOR = new Uint8Array([242, 35, 198, 137, 82, 225,
 // Circuit v3 (#350): sha256("global:deposit_note")[..8] — the deposit that
 // appends the note commitment to the on-chain incremental tree.
 export const DEPOSIT_NOTE_DISCRIMINATOR = new Uint8Array([75, 212, 96, 185, 178, 167, 29, 57])
+// #779: sha256("global:deposit_note_spl")[..8] — the SPL analogue that moves a
+// token into its per-mint asset vault and appends the note (asset = the mint).
+export const DEPOSIT_NOTE_SPL_DISCRIMINATOR = new Uint8Array([
+  244, 219, 167, 106, 7, 120, 254, 253
+])
 // sha256("event:DepositNoteEvent")[..8] / sha256("event:TransactEvent")[..8] —
 // the program events the wallet scans to rebuild the v3 tree client-side.
 export const DEPOSIT_NOTE_EVENT_DISCRIMINATOR = new Uint8Array([85, 20, 187, 76, 92, 196, 249, 195])
+// #779: sha256("event:DepositNoteSplEvent")[..8]. SPL deposits append to the
+// SAME tree as native, so their leaves must be included when rebuilding it, or
+// the tree diverges from on-chain and every spend (native included) freezes.
+export const DEPOSIT_NOTE_SPL_EVENT_DISCRIMINATOR = new Uint8Array([
+  229, 33, 39, 208, 18, 5, 237, 1
+])
 export const TRANSACT_EVENT_DISCRIMINATOR = new Uint8Array([89, 245, 87, 250, 222, 30, 135, 142])
 
 // PDA seeds.
 export const BRIDGE_STATE_SEED = "bridge_state"
 export const BRIDGE_VAULT_SEED = "bridge_vault"
 export const MERKLE_TREE_SEED = "merkle_tree"
+// #779: per-mint shielded-token vault + its config.
+export const ASSET_VAULT_SEED = "asset_vault"
+export const ASSET_CONFIG_SEED = "asset_config"
+
+// SPL token programs, for building an SPL deposit's account list. The classic
+// program covers USDC; a Token-2022 mint passes its own program id.
+export const TOKEN_PROGRAM_ID = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+export const ASSOCIATED_TOKEN_PROGRAM_ID = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
 
 // RPC endpoints. No API key is stored in the extension. Rebuilding the v3 tree
 // (fetchV3Leaves) pages the program's full signature history and reads each

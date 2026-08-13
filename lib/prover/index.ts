@@ -3,6 +3,7 @@
 // leaves the wallet. The proving keys and wasm are bundled as assets.
 
 import init, {
+  mint_to_asset,
   note_commitment_v2,
   prove_transact,
   prove_transfer_v2,
@@ -10,6 +11,7 @@ import init, {
   spend_pubkey,
   v3_merkle_path,
   v3_note_commitment,
+  v3_note_commitment_asset,
   v3_note_pubkey
 } from "./paraloom_prover_wasm.js"
 import wasmUrl from "url:./paraloom_prover_wasm_bg.wasm"
@@ -19,6 +21,15 @@ import transactKeyUrl from "url:./transact_v3_proving.key"
 
 // Native-SOL asset id (#235): all-zero 32 bytes, hex. SPL assets use the mint.
 export const NATIVE_ASSET_HEX = "00".repeat(32)
+
+// The shielded-asset id for an SPL `mint` (#779): Poseidon(2) over the mint's
+// two 16-byte halves, matching the on-chain `merkle_tree::mint_to_asset`. Use
+// this as the `assetId` for a shielded SPL note or transact. `mintHex` is the
+// 32-byte mint pubkey, hex.
+export async function assetIdForMint(mintHex: string): Promise<string> {
+  await ensureInit()
+  return mint_to_asset(mintHex)
+}
 
 let initialized = false
 let provingKey: Uint8Array | null = null
@@ -175,6 +186,18 @@ export async function v3NoteCommitment(
   return v3_note_commitment(amount, pubkeyHex, blindingHex)
 }
 
+// Asset-aware v3 commitment (#779): pass the note's assetId (all-zero for native
+// SOL, or `assetIdForMint(mint)` for a shielded SPL note) to locate its leaf.
+export async function v3NoteCommitmentAsset(
+  amount: bigint,
+  pubkeyHex: string,
+  blindingHex: string,
+  assetIdHex: string
+): Promise<string> {
+  await ensureInit()
+  return v3_note_commitment_asset(amount, pubkeyHex, blindingHex, assetIdHex)
+}
+
 // Rebuild the v3 tree from the ordered leaf list (public on-chain events) and
 // return `{ path: string[32], root: string }` for `leafIndex` — computed
 // locally so no validator learns which leaf is ours.
@@ -208,6 +231,7 @@ export async function proveTransact(
   rootHex: string,
   extAmount: bigint,
   recipientHex: string,
+  assetIdHex: string,
   inputs: [TransactProofInput, TransactProofInput],
   outputs: [TransactProofOutput, TransactProofOutput]
 ): Promise<string> {
@@ -228,5 +252,13 @@ export async function proveTransact(
       blinding_hex: o.blindingHex
     }))
   )
-  return prove_transact(pk, rootHex, BigInt(extAmount), recipientHex, inputsJson, outputsJson)
+  return prove_transact(
+    pk,
+    rootHex,
+    BigInt(extAmount),
+    recipientHex,
+    assetIdHex,
+    inputsJson,
+    outputsJson
+  )
 }

@@ -9,17 +9,24 @@
 // cannot, and because the withdraw self-funds the fresh address the swap pays
 // its own gas without the server holding anything.
 //
-// Availability: the v3 pool is native-SOL only, so the swapped token is held at
-// the fresh address, not re-shielded. Re-shielding an SPL output is
-// redeploy-gated follow-up work. This is a private *buy*, not a round trip.
+// Availability: with `reshield` the swapped SPL token is re-shielded into a
+// shielded note via deposit_note_spl (#779) — a true round trip (shielded SOL ->
+// shielded token). Without it (or for a "SOL" output) the token is left at the
+// fresh address as a private *buy*. Re-shielding is best-effort and fund-safe:
+// the token is already persisted at the fresh address before it runs, so a
+// failed re-shield simply leaves a private buy rather than stranding anything.
 
 import {
   Connection,
   Keypair,
   LAMPORTS_PER_SOL,
+  PublicKey,
   VersionedTransaction
 } from "@solana/web3.js"
 
+import { assetIdForMint } from "~lib/prover"
+
+import { associatedTokenAddress, depositSpl } from "./bridge"
 import { SWAP_ROUTER_URL } from "./constants"
 import type { ShieldedNote } from "./notes"
 import { saveSwapOutput } from "./swapOutputs"
@@ -43,6 +50,19 @@ export interface PrivateSwapParams {
   amountLamports: bigint
   /** Max slippage in bps (default 100 = 1%). */
   slippageBps?: number
+  /** Re-shield the swapped token back into the shielded pool (a round trip),
+   *  instead of leaving it at the fresh address (a private buy). Ignored for a
+   *  "SOL" output. Best-effort: on failure the token stays at the fresh address. */
+  reshield?: boolean
+}
+
+/** The shielded SPL note produced by a re-shield, so the caller can persist it
+ *  against the wallet's account (privateSwap does not own note storage). */
+export interface ReshieldedNote {
+  assetId: string
+  amount: string
+  blindingHex: string
+  depositSignature: string
 }
 
 export interface PrivateSwapResult {
@@ -58,6 +78,10 @@ export interface PrivateSwapResult {
   swapSignature: string
   /** Output amount the route reported, in the out mint's base units. */
   outAmount: number
+  /** Present when `reshield` was requested and succeeded: the shielded SPL note
+   *  the caller should persist. Absent means the token stayed at the fresh
+   *  address (a private buy) — either not requested or the re-shield failed. */
+  reshielded?: ReshieldedNote
 }
 
 // Wait for the swap transaction to confirm by polling its signature status.
@@ -214,11 +238,51 @@ export async function privateSwap(
   // on-chain error (or if it truly never confirms).
   await waitForSwapConfirmation(connection, swapSignature)
 
+  // 7. Optional round trip: re-shield the swapped token back into the pool. The
+  //    token is already safely at the fresh address (persisted above), so this
+  //    is best-effort — any failure leaves a private buy rather than stranding
+  //    funds. Skipped for a "SOL" output (re-shielding native SOL is pointless).
+  let reshielded: ReshieldedNote | undefined
+  if (params.reshield && params.outputMint !== "SOL") {
+    try {
+      const mint = new PublicKey(params.outputMint)
+      const ata = associatedTokenAddress(fresh.publicKey, mint)
+      // Re-shield the ACTUAL received balance, not the route's quote, so the
+      // note matches what really landed after swap slippage.
+      const bal = await connection.getTokenAccountBalance(ata)
+      const tokenAmount = BigInt(bal.value.amount)
+      if (tokenAmount > 0n) {
+        const assetId = await assetIdForMint(
+          Buffer.from(mint.toBytes()).toString("hex")
+        )
+        const dep = await depositSpl(
+          connection,
+          fresh,
+          shieldedAddress,
+          mint,
+          tokenAmount,
+          assetId
+        )
+        reshielded = {
+          assetId,
+          amount: tokenAmount.toString(),
+          blindingHex: Buffer.from(dep.blinding).toString("hex"),
+          depositSignature: dep.signature
+        }
+      }
+    } catch {
+      // Leave the token at the fresh address as a private buy; the caller sees
+      // `reshielded` undefined and the swap output is already saved.
+      reshielded = undefined
+    }
+  }
+
   return {
     freshAddress: fresh.publicKey.toBase58(),
     freshSecretKey: fresh.secretKey,
     withdrawRequestId: requestId,
     swapSignature,
-    outAmount: out_amount
+    outAmount: out_amount,
+    reshielded
   }
 }
