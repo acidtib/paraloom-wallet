@@ -11,6 +11,10 @@ export interface ShieldedNote {
   amount: string // lamports, bigint serialized
   blinding: string // hex, 32 bytes (per-note randomizer)
   assetId: string // hex, 32 bytes (all-zero = native SOL)
+  // The SPL mint (base58) for a shielded-token note (#779). Absent for native
+  // SOL. Kept alongside `assetId` because assetId = mint_to_asset(mint) is a
+  // one-way hash, and spending the note must send the mint to the ingress.
+  mint?: string
   signature: string // deposit transaction (empty for discovered transfer notes)
   createdAt: number
   spent: boolean

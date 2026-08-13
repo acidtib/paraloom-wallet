@@ -702,6 +702,7 @@ async function handlePrivateSwap(
       amount: result.reshielded.amount,
       blinding: result.reshielded.blindingHex,
       assetId: result.reshielded.assetId,
+      mint: result.reshielded.mint,
       signature: result.reshielded.depositSignature,
       createdAt: Date.now(),
       spent: false,
