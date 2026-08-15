@@ -11,6 +11,10 @@ export interface ShieldedNote {
   amount: string // lamports, bigint serialized
   blinding: string // hex, 32 bytes (per-note randomizer)
   assetId: string // hex, 32 bytes (all-zero = native SOL)
+  // The SPL mint (base58) for a shielded-token note (#779). Absent for native
+  // SOL. Kept alongside `assetId` because assetId = mint_to_asset(mint) is a
+  // one-way hash, and spending the note must send the mint to the ingress.
+  mint?: string
   signature: string // deposit transaction (empty for discovered transfer notes)
   createdAt: number
   spent: boolean
@@ -96,10 +100,27 @@ export async function markNoteSpentByIdentity(account: string, note: ShieldedNot
   // reachable from the current note-creation paths, which always set one.
 }
 
-// Sum of unspent notes, in lamports.
+// Native SOL shielded balance, in lamports. SPL notes (#779) are EXCLUDED:
+// their `amount` is in the token's own base units (e.g. 6-decimal USDC), so
+// summing them as lamports would corrupt the SOL figure. A note is native iff
+// it carries no `mint`. Use shieldedTokenBalances() for the SPL side.
 export async function shieldedBalance(account: string): Promise<bigint> {
   const notes = await getNotes(account)
   return notes
-    .filter((n) => !n.spent)
+    .filter((n) => !n.spent && !n.mint)
     .reduce((sum, n) => sum + BigInt(n.amount), 0n)
+}
+
+// Unspent shielded SPL balances keyed by base58 mint (#779). Each amount is in
+// that mint's own base units, kept separate from the native lamports sum.
+export async function shieldedTokenBalances(
+  account: string
+): Promise<Record<string, bigint>> {
+  const notes = await getNotes(account)
+  const byMint: Record<string, bigint> = {}
+  for (const n of notes) {
+    if (n.spent || !n.mint) continue
+    byMint[n.mint] = (byMint[n.mint] ?? 0n) + BigInt(n.amount)
+  }
+  return byMint
 }

@@ -3,7 +3,7 @@
 // transfer (ext_amount == 0, value moves between output notes); partial spends
 // return change to the wallet as a new note — the audit #16 fix.
 
-import { Connection, Keypair } from "@solana/web3.js"
+import { Connection, Keypair, PublicKey } from "@solana/web3.js"
 
 import { addressBoxPubHex, addressSpendPubHex } from "~lib/crypto/keyManagement"
 import {
@@ -133,6 +133,23 @@ export async function spendV3(
   }
   const change = sumIn - payLamports
 
+  // Asset (#779): every input in one transact shares a single asset. Native SOL
+  // is the all-zero id; a shielded SPL note carries its mint-derived assetId and
+  // the mint itself (needed to tell the node to settle via transact_spl).
+  const assetIdHex = inputs[0].assetId || NATIVE_ASSET_HEX
+  if (inputs.some((n) => (n.assetId || NATIVE_ASSET_HEX) !== assetIdHex)) {
+    throw new Error("all spent notes must share one asset")
+  }
+  const isSpl = assetIdHex !== NATIVE_ASSET_HEX
+  const mintHex = isSpl && inputs[0].mint ? new PublicKey(inputs[0].mint).toBuffer().toString("hex") : undefined
+  if (isSpl && !mintHex) {
+    throw new Error("a shielded SPL note must carry its mint to be spent")
+  }
+  const noteCommitment = (amount: bigint, pubkeyHex: string, blindingHex: string) =>
+    isSpl
+      ? v3NoteCommitmentAsset(amount, pubkeyHex, blindingHex, assetIdHex)
+      : v3NoteCommitment(amount, pubkeyHex, blindingHex)
+
   // Membership paths from the client-side tree rebuild — the root every path
   // folds to is the root the proof cites.
   const leaves = await fetchV3Leaves(connection)
@@ -192,12 +209,12 @@ export async function spendV3(
       encryptNote(ownBoxPubHex, {
         amount: change,
         blindingHex: changeBlind,
-        assetIdHex: NATIVE_ASSET_HEX
+        assetIdHex
       }),
       encryptNote(ownBoxPubHex, {
         amount: 0n,
         blindingHex: fillerBlind,
-        assetIdHex: NATIVE_ASSET_HEX
+        assetIdHex
       })
     ]
   } else {
@@ -214,12 +231,12 @@ export async function spendV3(
       encryptNote(toBoxPub, {
         amount: payLamports,
         blindingHex: payBlind,
-        assetIdHex: NATIVE_ASSET_HEX
+        assetIdHex
       }),
       encryptNote(ownBoxPubHex, {
         amount: change,
         blindingHex: changeBlind,
-        assetIdHex: NATIVE_ASSET_HEX
+        assetIdHex
       })
     ]
   }
@@ -228,7 +245,7 @@ export async function spendV3(
     rootHex,
     extAmount,
     recipientHex,
-    NATIVE_ASSET_HEX,
+    assetIdHex,
     [inputSpecs[0], inputSpecs[1]] as never,
     [outputs[0], outputs[1]] as never
   )
@@ -239,7 +256,8 @@ export async function spendV3(
     recipientHex,
     bundle,
     ciphertexts,
-    ingressToken
+    ingressToken,
+    mintHex
   )
 
   // Mark inputs spent and record the change note locally. Deliberately WITHOUT
@@ -258,12 +276,13 @@ export async function spendV3(
     await addNote(shieldedAddress, {
       amount: change.toString(),
       blinding: changeBlind,
-      assetId: NATIVE_ASSET_HEX,
+      assetId: assetIdHex,
+      mint: isSpl ? inputs[0].mint : undefined,
       signature: "",
       createdAt: Date.now(),
       spent: false,
       source: "transfer",
-      commitment: await v3NoteCommitment(change, ownPubHex, changeBlind)
+      commitment: await noteCommitment(change, ownPubHex, changeBlind)
     })
   }
 

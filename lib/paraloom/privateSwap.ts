@@ -60,6 +60,8 @@ export interface PrivateSwapParams {
  *  against the wallet's account (privateSwap does not own note storage). */
 export interface ReshieldedNote {
   assetId: string
+  /** The SPL mint (base58), needed to later spend the shielded note (#779). */
+  mint: string
   amount: string
   blindingHex: string
   depositSignature: string
@@ -265,6 +267,7 @@ export async function privateSwap(
         )
         reshielded = {
           assetId,
+          mint: mint.toBase58(),
           amount: tokenAmount.toString(),
           blindingHex: Buffer.from(dep.blinding).toString("hex"),
           depositSignature: dep.signature
