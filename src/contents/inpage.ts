@@ -120,6 +120,12 @@ if (!(window as any).paraloom) {
       const r = await relay("GET_SHIELDED_BALANCE")
       return r?.lamports ?? null
     },
+    // Shielded SPL balances (#779) as { base58Mint: baseUnitsString }, e.g.
+    // re-shielded USDC. Empty object if none / unavailable / locked.
+    getShieldedTokenBalances: async () => {
+      const r = await relay("GET_SHIELDED_TOKEN_BALANCES")
+      return r?.balances ?? {}
+    },
     isConnected: async () => {
       const r = await relay("IS_CONNECTED")
       return r?.connected ?? false

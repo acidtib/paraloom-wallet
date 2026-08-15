@@ -7,7 +7,13 @@ import { deriveKeypairFromSeed, decryptWallet, decryptSeedPhrase, deriveBoxKeypa
 import { getStoredWallet } from "~lib/storage/secure"
 import type { Account } from "~lib/store/walletStore"
 import { getConnection, deposit, getSolBalance, solanaAddress, solanaAddressToBytes } from "~lib/paraloom/bridge"
-import { addNote, getNotes, markNoteSpent, shieldedBalance, type ShieldedNote } from "~lib/paraloom/notes"
+import { addNote, getNotes, markNoteSpent, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
+
+// Known shielded SPL tokens for display; unknown mints fall back to a truncated
+// mint and raw base units.
+const SHIELDED_TOKEN_META: Record<string, { symbol: string; decimals: number }> = {
+  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v: { symbol: "USDC", decimals: 6 }
+}
 import { withdraw } from "~lib/paraloom/withdraw"
 import { transfer } from "~lib/paraloom/transfer"
 import { depositV3, spendV3 } from "~lib/paraloom/transactFlow"
@@ -63,6 +69,7 @@ export function Home({ onLock }: HomeProps) {
   // Paraloom bridge state
   const [solBalance, setSolBalance] = useState(0n)
   const [shieldedLamports, setShieldedLamports] = useState(0n)
+  const [shieldedTokens, setShieldedTokens] = useState<Record<string, bigint>>({})
   const [showDepositModal, setShowDepositModal] = useState(false)
   const [depositAmount, setDepositAmount] = useState("")
   const [depositing, setDepositing] = useState(false)
@@ -224,6 +231,7 @@ export function Home({ onLock }: HomeProps) {
     }
     try {
       setShieldedLamports(await shieldedBalance(wallet.shieldedAddress))
+      setShieldedTokens(await shieldedTokenBalances(wallet.shieldedAddress))
       setNotes((await getNotes(wallet.shieldedAddress)).slice().reverse())
     } catch {
       // storage read failed — ignore
@@ -621,6 +629,21 @@ export function Home({ onLock }: HomeProps) {
                   {(Number(shieldedLamports) / 1e9).toFixed(4)} SOL
                 </span>
               </div>
+              {Object.entries(shieldedTokens)
+                .filter(([, amount]) => amount > 0n)
+                .map(([mint, amount]) => {
+                  const meta = SHIELDED_TOKEN_META[mint]
+                  const symbol = meta?.symbol ?? `${mint.slice(0, 4)}…${mint.slice(-4)}`
+                  const decimals = meta?.decimals ?? 0
+                  return (
+                    <div className="shielded-balance-row" key={mint}>
+                      <span className="shielded-balance-label">Shielded {symbol}</span>
+                      <span className="shielded-balance-value">
+                        {formatBalance(amount, decimals)} {symbol}
+                      </span>
+                    </div>
+                  )
+                })}
 
               <div className="action-buttons">
                 <button className="action-button" onClick={() => setShowReceiveModal(true)}>

@@ -3,7 +3,7 @@ import { Connection } from "@solana/web3.js"
 import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
 import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
-import { addNote, getNotes, shieldedBalance, type ShieldedNote } from "~lib/paraloom/notes"
+import { addNote, getNotes, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
 import { scanForNotes } from "~lib/paraloom/scan"
 import { solanaAddress } from "~lib/paraloom/bridge"
 import { privateSwap } from "~lib/paraloom/privateSwap"
@@ -275,6 +275,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "GET_SHIELDED_BALANCE") {
     handleShieldedBalance(sender).then(sendResponse).catch(() => {
       sendResponse({ lamports: null })
+    })
+    return true
+  }
+
+  if (message.type === "GET_SHIELDED_TOKEN_BALANCES") {
+    handleShieldedTokenBalances(sender).then(sendResponse).catch(() => {
+      sendResponse({ balances: {} })
     })
     return true
   }
@@ -555,6 +562,28 @@ async function handleShieldedBalance(sender: chrome.runtime.MessageSender) {
   } catch {}
   const bal = await shieldedBalance(addr)
   return { lamports: bal.toString() }
+}
+
+// Shielded SPL balances per mint (#779), same authorization + refresh as the
+// native shielded balance. Amounts are strings (base units) keyed by base58
+// mint, to avoid BigInt serialization across the message bridge.
+async function handleShieldedTokenBalances(sender: chrome.runtime.MessageSender) {
+  if (!(await isAuthorizedSender(sender))) return { balances: {} }
+  const session = await loadSession()
+  if (!session) return { balances: {} }
+
+  const addr = session.wallet.shieldedAddress
+  try {
+    await scanForNotes(
+      addr,
+      session.wallet.boxSecretKey,
+      Buffer.from(session.wallet.spendPrivkey).toString("hex")
+    )
+  } catch {}
+  const balances = await shieldedTokenBalances(addr)
+  const out: Record<string, string> = {}
+  for (const [mint, amount] of Object.entries(balances)) out[mint] = amount.toString()
+  return { balances: out }
 }
 
 async function handleSignMessage(_message: string) {
