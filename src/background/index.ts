@@ -588,17 +588,36 @@ async function handleShieldedBalance(sender: chrome.runtime.MessageSender) {
   if (!session) return { lamports: null }
 
   const addr = session.wallet.shieldedAddress
-  // Best-effort refresh from the node; if it fails we still return whatever
-  // notes have already been scanned into storage.
+  // Return the LOCAL balance immediately. Awaiting scanForNotes here (a node
+  // fetch + a per-note WASM trial-decrypt loop) could run long enough for the
+  // MV3 service worker to be evicted mid-handler, so the page's read never
+  // resolved ("trying to load but can't"). Scan in the BACKGROUND instead; the
+  // next read picks up any newly discovered transfer notes.
+  void backgroundScan(session, addr)
+  const bal = await shieldedBalance(addr)
+  return { lamports: bal.toString() }
+}
+
+// Fire-and-forget transfer-note scan, deduped so overlapping reads do not stack
+// concurrent WASM loops. Never blocks a balance read.
+let scanInFlight = false
+async function backgroundScan(
+  session: Awaited<ReturnType<typeof loadSession>>,
+  addr: string
+): Promise<void> {
+  if (scanInFlight || !session) return
+  scanInFlight = true
   try {
     await scanForNotes(
       addr,
       session.wallet.boxSecretKey,
       Buffer.from(session.wallet.spendPrivkey).toString("hex")
     )
-  } catch {}
-  const bal = await shieldedBalance(addr)
-  return { lamports: bal.toString() }
+  } catch {
+    // node down / no scan endpoint — the local balance still stands
+  } finally {
+    scanInFlight = false
+  }
 }
 
 // Shielded SPL balances per mint (#779), same authorization + refresh as the
@@ -610,13 +629,11 @@ async function handleShieldedTokenBalances(sender: chrome.runtime.MessageSender)
   if (!session) return { balances: {} }
 
   const addr = session.wallet.shieldedAddress
-  try {
-    await scanForNotes(
-      addr,
-      session.wallet.boxSecretKey,
-      Buffer.from(session.wallet.spendPrivkey).toString("hex")
-    )
-  } catch {}
+  // Same as the native balance: return the LOCAL token balances immediately and
+  // scan in the background, so a slow scan can never evict the worker before the
+  // page's read resolves. Re-shielded USDC is a local deposit note, so it shows
+  // without waiting on the scan at all.
+  void backgroundScan(session, addr)
   const balances = await shieldedTokenBalances(addr)
   const out: Record<string, string> = {}
   for (const [mint, amount] of Object.entries(balances)) out[mint] = amount.toString()
