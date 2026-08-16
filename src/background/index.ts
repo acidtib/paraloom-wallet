@@ -3,9 +3,10 @@ import { Connection } from "@solana/web3.js"
 import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
 import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
-import { addNote, getNotes, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
+import { addNote, getNotes, markNoteSpentByCommitment, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
 import { scanForNotes } from "~lib/paraloom/scan"
 import { solanaAddress } from "~lib/paraloom/bridge"
+import { fetchV3Leaves } from "~lib/paraloom/transact"
 import { privateSwap } from "~lib/paraloom/privateSwap"
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 
@@ -683,6 +684,52 @@ async function runSwapJob(
   }
 }
 
+// Drop phantom notes before selection. A change/received note whose commitment
+// is NOT in the on-chain tree never actually settled — a swap that timed out
+// (before the node cosign fix) marked its inputs spent and recorded a change
+// note whose leaf never landed. Selecting one bricks the whole spend at
+// ensureLeafIndex ("note commitment not found in the on-chain tree"). Deposit
+// notes carry a trusted on-chain leafIndex and are never touched; only notes
+// located by commitment (no leafIndex) and older than a settlement grace window
+// are checked, so a just-settled note is never dropped on RPC lag. Dropping is a
+// soft mark-spent (the record + blinding are kept), so nothing real is lost.
+async function dropPhantomNotes(
+  connection: Connection,
+  account: string,
+  notes: ShieldedNote[]
+): Promise<ShieldedNote[]> {
+  const GRACE_MS = 120_000
+  const suspects = notes.filter(
+    (n) =>
+      n.leafIndex === undefined &&
+      !!n.commitment &&
+      Date.now() - n.createdAt > GRACE_MS
+  )
+  if (suspects.length === 0) return notes
+
+  let onchain: Set<string>
+  try {
+    const leaves = await fetchV3Leaves(connection)
+    onchain = new Set(leaves.map((l) => l.commitmentHex))
+  } catch {
+    return notes // cannot rebuild the tree safely — drop nothing
+  }
+
+  const dropped = new Set<string>()
+  for (const n of suspects) {
+    if (n.commitment && !onchain.has(n.commitment)) {
+      await markNoteSpentByCommitment(account, n.commitment)
+      dropped.add(n.commitment)
+    }
+  }
+  if (dropped.size > 0) {
+    console.log(
+      `[paraloom] reconciled ${dropped.size} phantom note(s) not present on-chain`
+    )
+  }
+  return notes.filter((n) => !(n.commitment && dropped.has(n.commitment)))
+}
+
 // The actual spend. Runs only after handlePrivateSwapRequest approved it.
 async function handlePrivateSwap(
   params: SwapRequestParams
@@ -697,12 +744,16 @@ async function handlePrivateSwap(
   const spendPrivkeyHex = Buffer.from(session.wallet.spendPrivkey).toString("hex")
   const ownBoxPubHex = Buffer.from(session.wallet.boxPublicKey).toString("hex")
 
-  const notes = (await getNotes(shieldedAddress)).filter(
+  const connection = new Connection(PRIVATE_SWAP_RPC_URL, "confirmed")
+
+  const candidates = (await getNotes(shieldedAddress)).filter(
     (n) => !n.spent && n.assetId === NATIVE_ASSET_HEX
   )
+  // Reconcile out phantom notes (leftovers from swaps that never settled)
+  // before selecting, so a stale note can't brick the spend.
+  const notes = await dropPhantomNotes(connection, shieldedAddress, candidates)
   const inputs = selectNotes(notes, amount)
 
-  const connection = new Connection(PRIVATE_SWAP_RPC_URL, "confirmed")
   const result = await privateSwap(
     connection,
     shieldedAddress,
