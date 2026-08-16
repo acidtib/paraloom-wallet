@@ -43,6 +43,13 @@ const SWAP_OVERHEAD_LAMPORTS = 6_000_000n
 const SETTLE_TIMEOUT_MS = 150_000
 const SETTLE_POLL_MS = 3_000
 
+/** Bound the routing call. It used to have NO timeout: an intermittently slow or
+ *  hung router would stall the whole swap for minutes with the withdrawn SOL
+ *  already sitting at the fresh address, until the page-side poll gave up
+ *  ("Private swap timed out") and left the funds stranded. */
+const ROUTE_TIMEOUT_MS = 30_000
+const ROUTE_RETRIES = 3
+
 export interface PrivateSwapParams {
   /** Output mint (base58) or the literal "SOL" for wrapped SOL. */
   outputMint: string
@@ -116,6 +123,129 @@ async function waitForSwapConfirmation(
   )
 }
 
+// fetch with a hard deadline: aborts instead of hanging forever on a stalled
+// connection. Used for the routing call so a slow router fails fast (and retries)
+// rather than stranding an already-withdrawn balance.
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const ctrl = new AbortController()
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs)
+  try {
+    return await fetch(url, { ...init, signal: ctrl.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// Ask the routing service for an UNSIGNED swap tx, with a bounded timeout and a
+// few retries. The service holds no key; it only builds the tx for `freshPubkey`.
+async function routeSwap(
+  freshPubkey: string,
+  outputMint: string,
+  swapLamports: bigint
+): Promise<{ out_amount: number; swap_transaction: string }> {
+  let lastErr: unknown
+  for (let attempt = 1; attempt <= ROUTE_RETRIES; attempt++) {
+    try {
+      const res = await fetchWithTimeout(
+        `${SWAP_ROUTER_URL}/swap/route`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            input_mint: "SOL",
+            output_mint: outputMint,
+            amount: Number(swapLamports),
+            user_public_key: freshPubkey
+          })
+        },
+        ROUTE_TIMEOUT_MS
+      )
+      if (!res.ok) {
+        lastErr = new Error(
+          `swap routing failed (${res.status}): ${await res.text()}`
+        )
+      } else {
+        return (await res.json()) as {
+          out_amount: number
+          swap_transaction: string
+        }
+      }
+    } catch (e) {
+      lastErr = e
+    }
+    if (attempt < ROUTE_RETRIES) {
+      await new Promise((r) => setTimeout(r, 1500 * attempt))
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error("swap routing failed")
+}
+
+// Route -> sign -> submit -> confirm a swap of `swapLamports` SOL at `fresh`.
+// Shared by the live swap and the resume/recovery path so both harden identically.
+async function executeSwapLeg(
+  connection: Connection,
+  fresh: Keypair,
+  outputMint: string,
+  swapLamports: bigint
+): Promise<{ swapSignature: string; outAmount: number }> {
+  const { out_amount, swap_transaction } = await routeSwap(
+    fresh.publicKey.toBase58(),
+    outputMint,
+    swapLamports
+  )
+  const tx = VersionedTransaction.deserialize(
+    Uint8Array.from(Buffer.from(swap_transaction, "base64"))
+  )
+  tx.sign([fresh])
+  const swapSignature = await connection.sendRawTransaction(tx.serialize(), {
+    maxRetries: 5
+  })
+  await waitForSwapConfirmation(connection, swapSignature)
+  return { swapSignature, outAmount: out_amount }
+}
+
+// Best-effort re-shield of whatever token actually landed at `fresh` into the
+// shielded pool (#779). Returns the shielded note to persist, or undefined if
+// nothing landed / the deposit failed (the token then stays as a private buy).
+async function reshieldToken(
+  connection: Connection,
+  fresh: Keypair,
+  shieldedAddress: string,
+  outputMint: string
+): Promise<ReshieldedNote | undefined> {
+  try {
+    const mint = new PublicKey(outputMint)
+    const ata = associatedTokenAddress(fresh.publicKey, mint)
+    const bal = await connection.getTokenAccountBalance(ata)
+    const tokenAmount = BigInt(bal.value.amount)
+    if (tokenAmount <= 0n) return undefined
+    const assetId = await assetIdForMint(
+      Buffer.from(mint.toBytes()).toString("hex")
+    )
+    const dep = await depositSpl(
+      connection,
+      fresh,
+      shieldedAddress,
+      mint,
+      tokenAmount,
+      assetId
+    )
+    return {
+      assetId,
+      mint: mint.toBase58(),
+      amount: tokenAmount.toString(),
+      blindingHex: Buffer.from(dep.blinding).toString("hex"),
+      depositSignature: dep.signature
+    }
+  } catch {
+    return undefined
+  }
+}
+
 async function waitForFunding(
   connection: Connection,
   pubkey: Keypair["publicKey"]
@@ -162,6 +292,7 @@ export async function privateSwap(
     outputMint: params.outputMint,
     outAmount: 0,
     swapSignature: "",
+    reshield: params.reshield ?? false,
     createdAt: Date.now()
   })
 
@@ -190,26 +321,13 @@ export async function privateSwap(
     )
   }
 
-  // 5. Ask the routing service to build an UNSIGNED swap tx for the fresh
-  //    address (the service holds no key).
-  const res = await fetch(`${SWAP_ROUTER_URL}/swap/route`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      input_mint: "SOL",
-      output_mint: params.outputMint,
-      amount: Number(swapLamports),
-      user_public_key: fresh.publicKey.toBase58()
-    })
-  })
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`swap routing failed (${res.status}): ${body}`)
-  }
-  const { out_amount, swap_transaction } = (await res.json()) as {
-    out_amount: number
-    swap_transaction: string
-  }
+  // 5. Ask the routing service (bounded timeout + retries) to build an UNSIGNED
+  //    swap tx for the fresh address (the service holds no key).
+  const { out_amount, swap_transaction } = await routeSwap(
+    fresh.publicKey.toBase58(),
+    params.outputMint,
+    swapLamports
+  )
 
   // 6. Sign the swap with the fresh key locally and submit it.
   const tx = VersionedTransaction.deserialize(
@@ -246,38 +364,12 @@ export async function privateSwap(
   //    funds. Skipped for a "SOL" output (re-shielding native SOL is pointless).
   let reshielded: ReshieldedNote | undefined
   if (params.reshield && params.outputMint !== "SOL") {
-    try {
-      const mint = new PublicKey(params.outputMint)
-      const ata = associatedTokenAddress(fresh.publicKey, mint)
-      // Re-shield the ACTUAL received balance, not the route's quote, so the
-      // note matches what really landed after swap slippage.
-      const bal = await connection.getTokenAccountBalance(ata)
-      const tokenAmount = BigInt(bal.value.amount)
-      if (tokenAmount > 0n) {
-        const assetId = await assetIdForMint(
-          Buffer.from(mint.toBytes()).toString("hex")
-        )
-        const dep = await depositSpl(
-          connection,
-          fresh,
-          shieldedAddress,
-          mint,
-          tokenAmount,
-          assetId
-        )
-        reshielded = {
-          assetId,
-          mint: mint.toBase58(),
-          amount: tokenAmount.toString(),
-          blindingHex: Buffer.from(dep.blinding).toString("hex"),
-          depositSignature: dep.signature
-        }
-      }
-    } catch {
-      // Leave the token at the fresh address as a private buy; the caller sees
-      // `reshielded` undefined and the swap output is already saved.
-      reshielded = undefined
-    }
+    reshielded = await reshieldToken(
+      connection,
+      fresh,
+      shieldedAddress,
+      params.outputMint
+    )
   }
 
   return {
@@ -288,4 +380,52 @@ export async function privateSwap(
     outAmount: out_amount,
     reshielded
   }
+}
+
+export interface ResumeSwapResult {
+  swapSignature: string
+  outAmount: number
+  reshielded?: ReshieldedNote
+}
+
+/**
+ * Finish a private swap whose withdraw already settled but whose swap leg never
+ * ran — the fresh address holds the withdrawn SOL but no token. This happens
+ * when the swap leg (routing / submit) hung or errored after the withdraw
+ * landed, so the page timed out with the funds stranded at the fresh address.
+ *
+ * Recovery is safe and idempotent: it reads the ACTUAL current balance at the
+ * fresh address and swaps that (minus the on-chain-cost reserve), so it never
+ * double-spends the input note (already consumed by the settled withdraw) and
+ * completes exactly the swap the user intended.
+ */
+export async function resumeSwapAtFreshAddress(
+  connection: Connection,
+  shieldedAddress: string,
+  freshSecretKeyHex: string,
+  outputMint: string,
+  reshield: boolean
+): Promise<ResumeSwapResult> {
+  const fresh = Keypair.fromSecretKey(
+    Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex"))
+  )
+  const funded = BigInt(await connection.getBalance(fresh.publicKey))
+  const swapLamports = funded - SWAP_OVERHEAD_LAMPORTS
+  if (swapLamports <= 0n) {
+    throw new Error("fresh address balance is below the swap overhead reserve")
+  }
+
+  const { swapSignature, outAmount } = await executeSwapLeg(
+    connection,
+    fresh,
+    outputMint,
+    swapLamports
+  )
+
+  let reshielded: ReshieldedNote | undefined
+  if (reshield && outputMint !== "SOL") {
+    reshielded = await reshieldToken(connection, fresh, shieldedAddress, outputMint)
+  }
+
+  return { swapSignature, outAmount, reshielded }
 }
