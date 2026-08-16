@@ -845,6 +845,18 @@ export function Home({ onLock }: HomeProps) {
                             )
                           }
                           const n = e.n
+                          // A re-shielded SPL note carries a mint; render it with
+                          // the token's decimals/symbol, not the SOL divisor.
+                          const USDC_MINT_DEP =
+                            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                          const depSym =
+                            n.mint === USDC_MINT_DEP ? "USDC" : n.mint ? "token" : "SOL"
+                          const depAmount =
+                            n.mint === USDC_MINT_DEP
+                              ? (Number(n.amount) / 1e6).toFixed(4)
+                              : n.mint
+                                ? n.amount
+                                : (Number(n.amount) / 1e9).toFixed(4)
                           return (
                             <div
                               key={n.signature || n.commitment || `dep-${i}`}
@@ -855,8 +867,8 @@ export function Home({ onLock }: HomeProps) {
                                 setActivityDetail({
                                   kind: "deposit",
                                   pending: false,
-                                  amount: `+${(Number(n.amount) / 1e9).toFixed(4)} SOL`,
-                                  sym: "SOL",
+                                  amount: `+${depAmount} ${depSym}`,
+                                  sym: depSym,
                                   address: "",
                                   signature: n.signature,
                                   explorerUrl: `https://explorer.solana.com/tx/${n.signature}?cluster=${network}`,
@@ -880,7 +892,7 @@ export function Home({ onLock }: HomeProps) {
                                 <div className="activity-row">
                                   <span className="activity-title">Deposit</span>
                                   <span className="activity-amount pos">
-                                    +{(Number(n.amount) / 1e9).toFixed(4)} SOL
+                                    +{depAmount} {depSym}
                                   </span>
                                 </div>
                                 <div className="activity-row">
