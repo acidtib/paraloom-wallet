@@ -178,7 +178,13 @@ export async function depositSpl(
   mint: PublicKey,
   amount: bigint,
   assetId: string,
-  tokenProgram: PublicKey = new PublicKey(TOKEN_PROGRAM_ID)
+  tokenProgram: PublicKey = new PublicKey(TOKEN_PROGRAM_ID),
+  // Called the instant the deposit is SUBMITTED (signature + blinding known),
+  // BEFORE waiting for confirmation. The blinding is random and lives only here
+  // and in the on-chain tx, so persisting the note now means a confirmation
+  // timeout or a worker eviction can never lose a shielded balance that already
+  // landed on-chain (#reshield-note-loss).
+  onSubmitted?: (result: DepositResult) => Promise<void>
 ): Promise<DepositResult> {
   const recipient = hexToBytes(addressSpendPubHex(shieldedAddress))
   const blinding = new Uint8Array(32)
@@ -195,11 +201,31 @@ export async function depositSpl(
     tokenProgram
   )
   const tx = new Transaction().add(ix)
-  const signature = await sendAndConfirmTransaction(connection, tx, [depositor], {
-    commitment: "confirmed"
-  })
+  const { blockhash, lastValidBlockHeight } =
+    await connection.getLatestBlockhash("confirmed")
+  tx.recentBlockhash = blockhash
+  tx.feePayer = depositor.publicKey
+  tx.sign(depositor)
 
-  return { signature, blinding, assetId, amount }
+  // Submit first, then persist the note, THEN confirm — so an interrupted
+  // confirmation cannot orphan a deposit that already landed.
+  const signature = await connection.sendRawTransaction(tx.serialize(), {
+    maxRetries: 5
+  })
+  const result = { signature, blinding, assetId, amount }
+  if (onSubmitted) {
+    try {
+      await onSubmitted(result)
+    } catch {
+      // Persisting is best-effort here; the recovery scan is the backstop.
+    }
+  }
+  await connection.confirmTransaction(
+    { signature, blockhash, lastValidBlockHeight },
+    "confirmed"
+  )
+
+  return result
 }
 
 function hexToBytes(hex: string): Uint8Array {
@@ -248,4 +274,86 @@ export async function getSolBalance(
 // funds a deposit (distinct from the paraloom1… shielded address).
 export function solanaAddress(publicKey: Uint8Array): string {
   return new PublicKey(publicKey).toBase58()
+}
+
+// ── Re-shield note recovery ──────────────────────────────────────────────────
+// A re-shield whose deposit landed on-chain but whose note was never persisted
+// (a confirmation timeout or worker eviction before the on-submit persist)
+// leaves a shielded balance the wallet cannot see or spend. The blinding is
+// random and lives only in the deposit instruction data, so recover it by
+// reading that instruction back from the fresh address's own deposit tx.
+
+const B58_ALPHABET =
+  "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+function base58Decode(s: string): Uint8Array {
+  const bytes: number[] = [0]
+  for (const ch of s) {
+    const v = B58_ALPHABET.indexOf(ch)
+    if (v < 0) throw new Error(`invalid base58 char: ${ch}`)
+    let carry = v
+    for (let j = 0; j < bytes.length; j++) {
+      carry += bytes[j] * 58
+      bytes[j] = carry & 0xff
+      carry >>= 8
+    }
+    while (carry > 0) {
+      bytes.push(carry & 0xff)
+      carry >>= 8
+    }
+  }
+  // preserve leading zero bytes (each leading '1' is a 0x00)
+  for (let k = 0; k < s.length && s[k] === "1"; k++) bytes.push(0)
+  return Uint8Array.from(bytes.reverse())
+}
+
+function bytesStartWith(a: Uint8Array, prefix: Uint8Array): boolean {
+  if (a.length < prefix.length) return false
+  for (let i = 0; i < prefix.length; i++) if (a[i] !== prefix[i]) return false
+  return true
+}
+
+/** Recover the re-shield note (amount + blinding) from the fresh address's
+ *  on-chain `deposit_note_spl` transaction, or null if none is found. Layout:
+ *  disc(8) | amount u64 LE (8) | pubkey(32) | blinding(32). */
+export async function recoverReshieldedNote(
+  connection: Connection,
+  freshAddress: string
+): Promise<{ amount: string; blindingHex: string; signature: string } | null> {
+  const pk = new PublicKey(freshAddress)
+  const sigs = await connection.getSignaturesForAddress(pk, { limit: 12 })
+  for (const s of sigs) {
+    const tx = await connection.getTransaction(s.signature, {
+      maxSupportedTransactionVersion: 0
+    })
+    if (!tx || tx.meta?.err) continue
+    const msg = tx.transaction.message as unknown as {
+      staticAccountKeys?: PublicKey[]
+      accountKeys?: PublicKey[]
+      compiledInstructions?: { programIdIndex: number; data: Uint8Array }[]
+      instructions?: { programIdIndex: number; data: string }[]
+    }
+    const keys = msg.staticAccountKeys ?? msg.accountKeys ?? []
+    const ixs = msg.compiledInstructions ?? msg.instructions ?? []
+    for (const ix of ixs) {
+      const prog = keys[ix.programIdIndex]
+      if (!prog || prog.toBase58() !== programId.toBase58()) continue
+      const data =
+        typeof (ix as { data: unknown }).data === "string"
+          ? base58Decode((ix as { data: string }).data)
+          : Uint8Array.from((ix as { data: Uint8Array }).data)
+      if (data.length < 80 || !bytesStartWith(data, DEPOSIT_NOTE_SPL_DISCRIMINATOR)) {
+        continue
+      }
+      const dv = new DataView(data.buffer, data.byteOffset, data.byteLength)
+      const amount = dv.getBigUint64(8, true)
+      const blinding = data.slice(48, 80)
+      return {
+        amount: amount.toString(),
+        blindingHex: Buffer.from(blinding).toString("hex"),
+        signature: s.signature
+      }
+    }
+  }
+  return null
 }

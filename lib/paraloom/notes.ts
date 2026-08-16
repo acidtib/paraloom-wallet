@@ -49,7 +49,15 @@ export async function getNotes(account: string): Promise<ShieldedNote[]> {
 
 export async function addNote(account: string, note: ShieldedNote): Promise<void> {
   const all = await readAll()
-  all[account] = [...(all[account] ?? []), note]
+  const existing = all[account] ?? []
+  // Idempotent by (non-empty) deposit signature: the same shielded note can be
+  // persisted more than once — the early on-submit persist AND the end-of-flow
+  // persist AND the recovery scan all target the same deposit — so dedupe here
+  // rather than double-counting the balance.
+  if (note.signature && existing.some((n) => n.signature === note.signature)) {
+    return
+  }
+  all[account] = [...existing, note]
   await writeAll(all)
 }
 

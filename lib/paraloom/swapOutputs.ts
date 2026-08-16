@@ -18,6 +18,9 @@ export interface SwapOutput {
   /** Whether the user asked to re-shield the bought token (a round trip). Saved
    *  so a resumed/recovered swap honors the original intent. */
   reshield?: boolean
+  /** Set once the re-shield note has been persisted (either normally or via the
+   *  recovery scan), so recovery does not re-scan a settled reshield each connect. */
+  reshieldRecovered?: boolean
   createdAt: number
 }
 

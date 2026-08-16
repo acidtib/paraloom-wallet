@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react"
+import { createPortal } from "react-dom"
 import { setLockState, updateAccounts, clearWallet, getNetwork, setNetwork as saveNetwork, getAutoLockMinutes, setAutoLockMinutes } from "~lib/storage/secure"
 import { clearSession } from "~lib/storage/session"
 import { getApprovedOrigins, removeApprovedOrigin } from "~lib/storage/connections"
@@ -890,8 +891,9 @@ export function Home({ onLock }: HomeProps) {
               )
             })()}
 
-            {activityDetail && (
-              <div className="detail-overlay" onClick={() => setActivityDetail(null)}>
+            {activityDetail &&
+              createPortal(
+                <div className="detail-overlay" onClick={() => setActivityDetail(null)}>
                 <div className="detail-sheet" onClick={(e) => e.stopPropagation()}>
                   <div className={`detail-title ${activityDetail.pending ? "muted" : ""}`}>
                     {activityDetail.kind === "buy" ? "Private buy" : "Deposit"}
@@ -991,8 +993,9 @@ export function Home({ onLock }: HomeProps) {
                     </button>
                   </div>
                 </div>
-              </div>
-            )}
+              </div>,
+                document.body
+              )}
           </div>
         ) : (
           /* ─── Settings Tab ─── */
