@@ -75,6 +75,17 @@ export function Home({ onLock }: HomeProps) {
   const [depositing, setDepositing] = useState(false)
   const [notes, setNotes] = useState<ShieldedNote[]>([])
   const [swapOutputs, setSwapOutputs] = useState<SwapOutput[]>([])
+  // The activity row the user tapped, shown in an in-app detail sheet.
+  const [activityDetail, setActivityDetail] = useState<{
+    kind: "buy" | "deposit"
+    pending: boolean
+    amount: string
+    sym: string
+    address: string
+    signature: string
+    explorerUrl: string
+    createdAt: number
+  } | null>(null)
   const [showWithdrawModal, setShowWithdrawModal] = useState(false)
   const [withdrawAddress, setWithdrawAddress] = useState("")
   const [withdrawing, setWithdrawing] = useState(false)
@@ -191,6 +202,22 @@ export function Home({ onLock }: HomeProps) {
 
   function shortSig(sig: string): string {
     return `${sig.slice(0, 4)}…${sig.slice(-4)}`
+  }
+
+  // Day bucket label for grouping the activity feed: Today / Yesterday / date.
+  function dayLabel(ts: number): string {
+    const d = new Date(ts)
+    const now = new Date()
+    const startOf = (x: Date) =>
+      new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime()
+    const days = Math.round((startOf(now) - startOf(d)) / 86_400_000)
+    if (days <= 0) return "Today"
+    if (days === 1) return "Yesterday"
+    return d.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: d.getFullYear() === now.getFullYear() ? undefined : "numeric"
+    })
   }
 
   function formatUSD(amount: number): string {
@@ -690,106 +717,282 @@ export function Home({ onLock }: HomeProps) {
         ) : bottomTab === "activity" ? (
           <div className="activity-content">
             {(() => {
-              // Only real deposits belong in the activity list. The zero-value
-              // change/filler notes a transact emits carry an empty signature,
-              // so rendering them all under key="" collided React keys (items
-              // drew on top of each other) and showed bogus "+0.0000 SOL" rows.
+              // Only real deposits belong in the feed. The zero-value change/
+              // filler notes a transact emits carry an empty signature, so
+              // rendering them all under key="" collided React keys.
               const deposits = notes.filter(
                 (n) => n.source === "deposit" && Number(n.amount) > 0
               )
-              return deposits.length === 0 && swapOutputs.length === 0 ? (
-                <div className="empty-state">
-                  <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.2">
-                    <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
-                    <polyline points="14 2 14 8 20 8"></polyline>
-                    <line x1="16" y1="13" x2="8" y2="13"></line>
-                    <line x1="16" y1="17" x2="8" y2="17"></line>
-                    <polyline points="10 9 9 9 8 9"></polyline>
-                  </svg>
-                  <div className="empty-title">No Activity Yet</div>
-                  <div className="empty-subtitle">Your transaction history will appear here</div>
-                </div>
-              ) : (
-                <>
-                  {swapOutputs.length > 0 && (
-                    <div className="activity-list" style={{ marginBottom: 16 }}>
-                      <div className="empty-subtitle" style={{ marginBottom: 4 }}>Private buys</div>
-                      {swapOutputs.map((s, i) => (
-                        <a
-                          key={s.freshAddress || i}
-                          className="activity-item"
-                          href={`https://solscan.io/account/${s.freshAddress}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          title="View the unlinkable address on Solscan"
-                        >
-                          <div className="activity-icon">
-                            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                              <polyline points="17 1 21 5 17 9"></polyline>
-                              <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
-                              <polyline points="7 23 3 19 7 15"></polyline>
-                              <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
-                            </svg>
-                          </div>
-                          <div className="activity-info">
-                            <div className="activity-row">
-                              <span className="activity-title">Private buy</span>
-                              <span className="activity-amount">
-                                {s.outAmount > 0
-                                  ? `${(s.outAmount / 1e6).toFixed(4)} ${s.outputMint === "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" ? "USDC" : "token"}`
-                                  : "pending…"}
-                              </span>
-                            </div>
-                            <div className="activity-row">
-                              <span className="activity-sub">
-                                <span className="activity-status">at</span>
-                                <span className="activity-dot">·</span>
-                                {s.freshAddress.slice(0, 4)}…{s.freshAddress.slice(-4)}
-                              </span>
-                              <span className="activity-sig">{timeAgo(s.createdAt)}</span>
-                            </div>
-                          </div>
-                        </a>
-                      ))}
-                    </div>
-                  )}
-                  <div className="activity-list">
-                    {deposits.map((n, i) => (
-                      <a
-                        key={n.signature || n.commitment || i}
-                        className="activity-item"
-                        href={`https://explorer.solana.com/tx/${n.signature}?cluster=${network}`}
-                        target="_blank"
-                        rel="noreferrer"
-                        title="View on Solana Explorer"
-                      >
-                        <div className="activity-icon">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                            <path d="M12 2v13"></path>
-                            <polyline points="6 9 12 15 18 9"></polyline>
-                            <line x1="5" y1="21" x2="19" y2="21"></line>
-                          </svg>
-                        </div>
-                        <div className="activity-info">
-                          <div className="activity-row">
-                            <span className="activity-title">Deposit</span>
-                            <span className="activity-amount">+{(Number(n.amount) / 1e9).toFixed(4)} SOL</span>
-                          </div>
-                          <div className="activity-row">
-                            <span className="activity-sub">
-                              <span className="activity-status">Confirmed</span>
-                              <span className="activity-dot">·</span>
-                              {timeAgo(n.createdAt)}
-                            </span>
-                            <span className="activity-sig">{shortSig(n.signature)}</span>
-                          </div>
-                        </div>
-                      </a>
-                    ))}
+              const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+
+              if (deposits.length === 0 && swapOutputs.length === 0) {
+                return (
+                  <div className="empty-state">
+                    <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.2">
+                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                      <polyline points="14 2 14 8 20 8"></polyline>
+                      <line x1="16" y1="13" x2="8" y2="13"></line>
+                      <line x1="16" y1="17" x2="8" y2="17"></line>
+                      <polyline points="10 9 9 9 8 9"></polyline>
+                    </svg>
+                    <div className="empty-title">No Activity Yet</div>
+                    <div className="empty-subtitle">Your transaction history will appear here</div>
                   </div>
-                </>
+                )
+              }
+
+              // Unify buys + deposits into one time-ordered feed, then bucket by
+              // day so the list reads like a real transaction history.
+              type Entry =
+                | { kind: "buy"; ts: number; s: SwapOutput }
+                | { kind: "deposit"; ts: number; n: ShieldedNote }
+              const entries: Entry[] = [
+                ...swapOutputs.map((s) => ({ kind: "buy" as const, ts: s.createdAt, s })),
+                ...deposits.map((n) => ({ kind: "deposit" as const, ts: n.createdAt, n }))
+              ].sort((a, b) => b.ts - a.ts)
+
+              const groups: { label: string; items: Entry[] }[] = []
+              for (const e of entries) {
+                const label = dayLabel(e.ts)
+                const last = groups[groups.length - 1]
+                if (last && last.label === label) last.items.push(e)
+                else groups.push({ label, items: [e] })
+              }
+
+              return (
+                <div className="activity-feed">
+                  {groups.map((g) => (
+                    <div className="activity-group" key={g.label}>
+                      <div className="activity-day">{g.label}</div>
+                      <div className="activity-list">
+                        {g.items.map((e, i) => {
+                          if (e.kind === "buy") {
+                            const s = e.s
+                            const done = s.outAmount > 0 && !!s.swapSignature
+                            const sym = s.outputMint === USDC_MINT ? "USDC" : "token"
+                            return (
+                              <div
+                                key={s.freshAddress || `buy-${i}`}
+                                className="activity-item"
+                                role="button"
+                                tabIndex={0}
+                                onClick={() =>
+                                  setActivityDetail({
+                                    kind: "buy",
+                                    pending: !done,
+                                    amount: done ? `+${(s.outAmount / 1e6).toFixed(4)} ${sym}` : "",
+                                    sym,
+                                    address: s.freshAddress,
+                                    signature: s.swapSignature || "",
+                                    explorerUrl: `https://solscan.io/account/${s.freshAddress}`,
+                                    createdAt: s.createdAt
+                                  })
+                                }
+                              >
+                                <div className="activity-avatar buy">
+                                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                                    <polyline points="17 1 21 5 17 9"></polyline>
+                                    <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+                                    <polyline points="7 23 3 19 7 15"></polyline>
+                                    <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+                                  </svg>
+                                  <span className={`activity-badge ${done ? "ok" : "pending"}`}>
+                                    {done ? (
+                                      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5">
+                                        <polyline points="20 6 9 17 4 12"></polyline>
+                                      </svg>
+                                    ) : (
+                                      <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                                        <circle cx="12" cy="12" r="9"></circle>
+                                        <polyline points="12 7 12 12 16 14"></polyline>
+                                      </svg>
+                                    )}
+                                  </span>
+                                </div>
+                                <div className="activity-info">
+                                  <div className="activity-row">
+                                    <span className="activity-title">Private buy</span>
+                                    {done ? (
+                                      <span className="activity-amount pos">
+                                        +{(s.outAmount / 1e6).toFixed(4)} {sym}
+                                      </span>
+                                    ) : (
+                                      <span className="activity-pill">Pending</span>
+                                    )}
+                                  </div>
+                                  <div className="activity-row">
+                                    <span className="activity-sub">
+                                      {done ? sym : "settling"}
+                                      <span className="activity-dot">·</span>
+                                      {s.freshAddress.slice(0, 4)}…{s.freshAddress.slice(-4)}
+                                    </span>
+                                    <span className="activity-time">{timeAgo(s.createdAt)}</span>
+                                  </div>
+                                </div>
+                              </div>
+                            )
+                          }
+                          const n = e.n
+                          return (
+                            <div
+                              key={n.signature || n.commitment || `dep-${i}`}
+                              className="activity-item"
+                              role="button"
+                              tabIndex={0}
+                              onClick={() =>
+                                setActivityDetail({
+                                  kind: "deposit",
+                                  pending: false,
+                                  amount: `+${(Number(n.amount) / 1e9).toFixed(4)} SOL`,
+                                  sym: "SOL",
+                                  address: "",
+                                  signature: n.signature,
+                                  explorerUrl: `https://explorer.solana.com/tx/${n.signature}?cluster=${network}`,
+                                  createdAt: n.createdAt
+                                })
+                              }
+                            >
+                              <div className="activity-avatar deposit">
+                                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                                  <path d="M12 3v13"></path>
+                                  <polyline points="6 10 12 16 18 10"></polyline>
+                                  <line x1="5" y1="21" x2="19" y2="21"></line>
+                                </svg>
+                                <span className="activity-badge ok">
+                                  <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5">
+                                    <polyline points="20 6 9 17 4 12"></polyline>
+                                  </svg>
+                                </span>
+                              </div>
+                              <div className="activity-info">
+                                <div className="activity-row">
+                                  <span className="activity-title">Deposit</span>
+                                  <span className="activity-amount pos">
+                                    +{(Number(n.amount) / 1e9).toFixed(4)} SOL
+                                  </span>
+                                </div>
+                                <div className="activity-row">
+                                  <span className="activity-sub">
+                                    Shielded
+                                    <span className="activity-dot">·</span>
+                                    {shortSig(n.signature)}
+                                  </span>
+                                  <span className="activity-time">{timeAgo(n.createdAt)}</span>
+                                </div>
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
               )
             })()}
+
+            {activityDetail && (
+              <div className="detail-overlay" onClick={() => setActivityDetail(null)}>
+                <div className="detail-sheet" onClick={(e) => e.stopPropagation()}>
+                  <div className={`detail-title ${activityDetail.pending ? "muted" : ""}`}>
+                    {activityDetail.kind === "buy" ? "Private buy" : "Deposit"}
+                  </div>
+                  <div className={`detail-hero-icon ${activityDetail.kind}`}>
+                    {activityDetail.kind === "buy" ? (
+                      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                        <polyline points="17 1 21 5 17 9"></polyline>
+                        <path d="M3 11V9a4 4 0 0 1 4-4h14"></path>
+                        <polyline points="7 23 3 19 7 15"></polyline>
+                        <path d="M21 13v2a4 4 0 0 1-4 4H3"></path>
+                      </svg>
+                    ) : (
+                      <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2">
+                        <path d="M12 3v13"></path>
+                        <polyline points="6 10 12 16 18 10"></polyline>
+                        <line x1="5" y1="21" x2="19" y2="21"></line>
+                      </svg>
+                    )}
+                    <span className={`activity-badge ${activityDetail.pending ? "pending" : "ok"}`}>
+                      {activityDetail.pending ? (
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3">
+                          <circle cx="12" cy="12" r="9"></circle>
+                          <polyline points="12 7 12 12 16 14"></polyline>
+                        </svg>
+                      ) : (
+                        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3.5">
+                          <polyline points="20 6 9 17 4 12"></polyline>
+                        </svg>
+                      )}
+                    </span>
+                  </div>
+                  <div className={`detail-amount ${activityDetail.pending ? "muted" : "pos"}`}>
+                    {activityDetail.pending ? "Pending" : activityDetail.amount}
+                  </div>
+
+                  <div className="detail-rows">
+                    <div className="detail-row">
+                      <span className="detail-key">Date</span>
+                      <span className="detail-val">
+                        {new Date(activityDetail.createdAt).toLocaleString(undefined, {
+                          month: "short",
+                          day: "numeric",
+                          year: "numeric",
+                          hour: "numeric",
+                          minute: "2-digit"
+                        })}
+                      </span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-key">Status</span>
+                      <span className={`detail-val ${activityDetail.pending ? "warn" : "good"}`}>
+                        {activityDetail.pending ? "Settling" : "Succeeded"}
+                      </span>
+                    </div>
+                    <div className="detail-row">
+                      <span className="detail-key">Type</span>
+                      <span className="detail-val">
+                        {activityDetail.kind === "buy"
+                          ? `Private swap → ${activityDetail.sym}`
+                          : "Shielded deposit"}
+                      </span>
+                    </div>
+                    {activityDetail.kind === "buy" && (
+                      <div className="detail-row">
+                        <span className="detail-key">Fresh address</span>
+                        <span className="detail-val mono">
+                          {activityDetail.address.slice(0, 4)}…{activityDetail.address.slice(-4)}
+                        </span>
+                      </div>
+                    )}
+                    {activityDetail.signature && (
+                      <div className="detail-row">
+                        <span className="detail-key">Signature</span>
+                        <span className="detail-val mono">{shortSig(activityDetail.signature)}</span>
+                      </div>
+                    )}
+                    <div className="detail-row">
+                      <span className="detail-key">Network</span>
+                      <span className="detail-val">
+                        Solana {network === "mainnet-beta" ? "Mainnet" : "Devnet"}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="detail-actions">
+                    <a
+                      className="detail-btn ghost"
+                      href={activityDetail.explorerUrl}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      View on {activityDetail.kind === "buy" ? "Solscan" : "Explorer"}
+                    </a>
+                    <button className="detail-btn" onClick={() => setActivityDetail(null)}>
+                      Close
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
         ) : (
           /* ─── Settings Tab ─── */
