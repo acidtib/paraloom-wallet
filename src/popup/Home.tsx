@@ -21,6 +21,7 @@ import { depositV3, spendV3 } from "~lib/paraloom/transactFlow"
 import { addressBoxPubHex } from "~lib/crypto/keyManagement"
 import { scanForNotes } from "~lib/paraloom/scan"
 import { listSwapOutputs, type SwapOutput } from "~lib/paraloom/swapOutputs"
+import { recoverReshields } from "~lib/paraloom/reshieldRecovery"
 import { QRCodeSVG } from "qrcode.react"
 
 import logoImg from "data-base64:~/../assets/icon.png"
@@ -256,6 +257,16 @@ export function Home({ onLock }: HomeProps) {
       )
     } catch {
       // transfer node down / no scan endpoint — ignore
+    }
+    // Recover any re-shield whose deposit landed on-chain but whose note was
+    // never persisted (or whose deposit never ran but the token is still at the
+    // fresh address). Runs directly in the popup — no service-worker relay — so
+    // it always fires when the wallet is opened, and the reads below then reflect
+    // the recovered shielded balance.
+    try {
+      await recoverReshields(getConnection(network), wallet.shieldedAddress)
+    } catch {
+      // best-effort — the reads below still show whatever is already local
     }
     try {
       setShieldedLamports(await shieldedBalance(wallet.shieldedAddress))
