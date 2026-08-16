@@ -12,8 +12,12 @@ export interface SwapOutput {
   outputMint: string
   /** Output amount the route reported, in the out mint's base units. */
   outAmount: number
-  /** The swap transaction signature. */
+  /** The swap transaction signature. Empty until the swap leg completes; a
+   *  non-empty value marks the swap done (used to find resumable strands). */
   swapSignature: string
+  /** Whether the user asked to re-shield the bought token (a round trip). Saved
+   *  so a resumed/recovered swap honors the original intent. */
+  reshield?: boolean
   createdAt: number
 }
 

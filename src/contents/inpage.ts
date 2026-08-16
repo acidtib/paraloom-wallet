@@ -129,6 +129,13 @@ if (!(window as any).paraloom) {
     isConnected: async () => {
       const r = await relay("IS_CONNECTED")
       return r?.connected ?? false
+    },
+    // Finish any earlier private swap whose withdraw settled but whose swap leg
+    // never completed (funds stranded at the fresh address). Safe to call on
+    // connect; resolves to the number recovered (0 if nothing to do).
+    resumeSwaps: async () => {
+      const r = await relay("RESUME_SWAPS").catch(() => null)
+      return r?.recovered ?? 0
     }
   }
   console.log("[paraloom] wallet bridge ready (main world)")
