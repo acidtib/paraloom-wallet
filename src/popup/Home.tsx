@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from "react"
+import { createPortal } from "react-dom"
 import { setLockState, updateAccounts, clearWallet, getNetwork, setNetwork as saveNetwork, getAutoLockMinutes, setAutoLockMinutes } from "~lib/storage/secure"
 import { clearSession } from "~lib/storage/session"
 import { getApprovedOrigins, removeApprovedOrigin } from "~lib/storage/connections"
@@ -20,6 +21,8 @@ import { depositV3, spendV3 } from "~lib/paraloom/transactFlow"
 import { addressBoxPubHex } from "~lib/crypto/keyManagement"
 import { scanForNotes } from "~lib/paraloom/scan"
 import { listSwapOutputs, type SwapOutput } from "~lib/paraloom/swapOutputs"
+import { recoverReshields } from "~lib/paraloom/reshieldRecovery"
+import { fetchPrices, SOL_MINT, type TokenPrice } from "~lib/paraloom/prices"
 import { QRCodeSVG } from "qrcode.react"
 
 import logoImg from "data-base64:~/../assets/icon.png"
@@ -70,6 +73,7 @@ export function Home({ onLock }: HomeProps) {
   const [solBalance, setSolBalance] = useState(0n)
   const [shieldedLamports, setShieldedLamports] = useState(0n)
   const [shieldedTokens, setShieldedTokens] = useState<Record<string, bigint>>({})
+  const [prices, setPrices] = useState<Record<string, TokenPrice>>({})
   const [showDepositModal, setShowDepositModal] = useState(false)
   const [depositAmount, setDepositAmount] = useState("")
   const [depositing, setDepositing] = useState(false)
@@ -256,6 +260,16 @@ export function Home({ onLock }: HomeProps) {
     } catch {
       // transfer node down / no scan endpoint — ignore
     }
+    // Recover any re-shield whose deposit landed on-chain but whose note was
+    // never persisted (or whose deposit never ran but the token is still at the
+    // fresh address). Runs directly in the popup — no service-worker relay — so
+    // it always fires when the wallet is opened, and the reads below then reflect
+    // the recovered shielded balance.
+    try {
+      await recoverReshields(getConnection(network), wallet.shieldedAddress)
+    } catch {
+      // best-effort — the reads below still show whatever is already local
+    }
     try {
       setShieldedLamports(await shieldedBalance(wallet.shieldedAddress))
       setShieldedTokens(await shieldedTokenBalances(wallet.shieldedAddress))
@@ -269,6 +283,14 @@ export function Home({ onLock }: HomeProps) {
     loadBalances()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wallet, network])
+
+  // USD prices for the held assets (SOL is always priced). Refetch when the set
+  // of shielded tokens changes; a failed fetch just leaves amounts un-valued.
+  useEffect(() => {
+    fetchPrices(Object.keys(shieldedTokens))
+      .then(setPrices)
+      .catch(() => {})
+  }, [shieldedTokens])
 
   async function handleDeposit() {
     if (!wallet) return
@@ -635,84 +657,143 @@ export function Home({ onLock }: HomeProps) {
       <div className="wallet-content">
         {bottomTab === "home" ? (
           <>
-            {/* Portfolio Section */}
-            <div className="portfolio-card">
-              <div className="portfolio-header">
-                <div className="portfolio-label">Total Balance</div>
-                <div className="portfolio-amount">
-                  {((Number(solBalance) + Number(shieldedLamports)) / 1e9).toFixed(4)} SOL
-                </div>
-              </div>
+            {(() => {
+              const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+              type Holding = {
+                key: string
+                name: string
+                symbol: string
+                usdcMark?: boolean
+                amount: bigint
+                decimals: number
+                mint: string
+                privacy: "public" | "shielded"
+              }
+              const holdings: Holding[] = []
+              if (solBalance > 0n)
+                holdings.push({ key: "pub-sol", name: "Solana", symbol: "SOL", amount: solBalance, decimals: 9, mint: SOL_MINT, privacy: "public" })
+              if (shieldedLamports > 0n)
+                holdings.push({ key: "sh-sol", name: "Solana", symbol: "SOL", amount: shieldedLamports, decimals: 9, mint: SOL_MINT, privacy: "shielded" })
+              for (const [mint, amount] of Object.entries(shieldedTokens)) {
+                if (amount <= 0n) continue
+                const meta = SHIELDED_TOKEN_META[mint]
+                holdings.push({
+                  key: `sh-${mint}`,
+                  name: meta?.symbol === "USDC" ? "USD Coin" : (meta?.symbol ?? "Token"),
+                  symbol: meta?.symbol ?? `${mint.slice(0, 4)}…`,
+                  usdcMark: mint === USDC_MINT,
+                  amount,
+                  decimals: meta?.decimals ?? 0,
+                  mint,
+                  privacy: "shielded"
+                })
+              }
+              const usdOf = (h: Holding): number | null => {
+                const p = prices[h.mint]?.usdPrice
+                return p != null ? (Number(h.amount) / 10 ** h.decimals) * p : null
+              }
+              const total = holdings.reduce((s, h) => s + (usdOf(h) ?? 0), 0)
+              const shieldedUsd = holdings
+                .filter((h) => h.privacy === "shielded")
+                .reduce((s, h) => s + (usdOf(h) ?? 0), 0)
+              const publicUsd = total - shieldedUsd
+              const fmtUsd = (n: number) =>
+                `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+              const eye = (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <circle cx="12" cy="12" r="3"></circle>
+                  <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z"></path>
+                </svg>
+              )
+              const shield = (
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                  <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                </svg>
+              )
+              return (
+                <>
+                  <div className="home-total-label">Total balance</div>
+                  <div className="home-total">{fmtUsd(total)}</div>
+                  <div className="home-split">
+                    <span className="home-chip">{eye}{fmtUsd(publicUsd)} public</span>
+                    <span className="home-chip sh">{shield}{fmtUsd(shieldedUsd)} shielded</span>
+                  </div>
 
-              <div className="shielded-balance-row">
-                <span className="shielded-balance-label">Public (Solana)</span>
-                <span className="shielded-balance-value">
-                  {(Number(solBalance) / 1e9).toFixed(4)} SOL
-                </span>
-              </div>
-              <div className="shielded-balance-row">
-                <span className="shielded-balance-label">Shielded (Paraloom)</span>
-                <span className="shielded-balance-value">
-                  {(Number(shieldedLamports) / 1e9).toFixed(4)} SOL
-                </span>
-              </div>
-              {Object.entries(shieldedTokens)
-                .filter(([, amount]) => amount > 0n)
-                .map(([mint, amount]) => {
-                  const meta = SHIELDED_TOKEN_META[mint]
-                  const symbol = meta?.symbol ?? `${mint.slice(0, 4)}…${mint.slice(-4)}`
-                  const decimals = meta?.decimals ?? 0
-                  return (
-                    <div className="shielded-balance-row" key={mint}>
-                      <span className="shielded-balance-label">Shielded {symbol}</span>
-                      <span className="shielded-balance-value">
-                        {formatBalance(amount, decimals)} {symbol}
-                      </span>
-                    </div>
-                  )
-                })}
+                  <div className="home-actions">
+                    <button className="home-act" onClick={() => setShowReceiveModal(true)}>
+                      <span className="home-act-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg></span>
+                      <span className="home-act-lb">Receive</span>
+                    </button>
+                    <button className="home-act" onClick={() => { setShowDepositModal(true); loadBalances() }}>
+                      <span className="home-act-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v13"></path><polyline points="6 9 12 15 18 9"></polyline><line x1="5" y1="21" x2="19" y2="21"></line></svg></span>
+                      <span className="home-act-lb">Deposit</span>
+                    </button>
+                    <button className="home-act" onClick={() => { if (wallet) setWithdrawAddress(solanaAddress(wallet.publicKey)); setShowWithdrawModal(true); loadBalances() }}>
+                      <span className="home-act-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22V9"></path><polyline points="6 15 12 9 18 15"></polyline><line x1="5" y1="3" x2="19" y2="3"></line></svg></span>
+                      <span className="home-act-lb">Withdraw</span>
+                    </button>
+                    <button className="home-act" onClick={() => { setShowTransferModal(true); loadBalances() }}>
+                      <span className="home-act-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="4" y1="9" x2="20" y2="9"></line><polyline points="15 4 20 9 15 14"></polyline><line x1="20" y1="15" x2="4" y2="15"></line><polyline points="9 10 4 15 9 20"></polyline></svg></span>
+                      <span className="home-act-lb">Transfer</span>
+                    </button>
+                  </div>
 
-              <div className="action-buttons">
-                <button className="action-button" onClick={() => setShowReceiveModal(true)}>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <line x1="12" y1="5" x2="12" y2="19"></line>
-                    <polyline points="19 12 12 19 5 12"></polyline>
-                  </svg>
-                  <span className="action-button-label">Receive</span>
-                </button>
-                <button className="action-button" onClick={() => { setShowDepositModal(true); loadBalances() }}>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M12 2v13"></path>
-                    <polyline points="6 9 12 15 18 9"></polyline>
-                    <line x1="5" y1="21" x2="19" y2="21"></line>
-                  </svg>
-                  <span className="action-button-label">Deposit</span>
-                </button>
-                <button className="action-button" onClick={() => { if (wallet) setWithdrawAddress(solanaAddress(wallet.publicKey)); setShowWithdrawModal(true); loadBalances() }}>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M12 22V9"></path>
-                    <polyline points="6 15 12 9 18 15"></polyline>
-                    <line x1="5" y1="3" x2="19" y2="3"></line>
-                  </svg>
-                  <span className="action-button-label">Withdraw</span>
-                </button>
-                <button className="action-button" onClick={() => { setShowTransferModal(true); loadBalances() }}>
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <line x1="4" y1="9" x2="20" y2="9"></line>
-                    <polyline points="15 4 20 9 15 14"></polyline>
-                    <line x1="20" y1="15" x2="4" y2="15"></line>
-                    <polyline points="9 10 4 15 9 20"></polyline>
-                  </svg>
-                  <span className="action-button-label">Transfer</span>
-                </button>
-              </div>
-            </div>
-
-            {/* How the balances relate */}
-            <div className="paraloom-hint">
-              Deposit moves public SOL into your shielded Paraloom balance.
-              Withdraw moves it back to Solana.
-            </div>
+                  <div className="home-assets-head"><h3>Assets</h3></div>
+                  <div className="home-assets">
+                    {holdings.length === 0 ? (
+                      <div className="home-assets-empty">No assets yet. Deposit SOL to get started.</div>
+                    ) : (
+                      holdings.map((h) => {
+                        const usd = usdOf(h)
+                        const chg = prices[h.mint]?.priceChange24h
+                        return (
+                          <div className="home-asset" key={h.key}>
+                            <div className={`home-asset-logo ${h.usdcMark ? "usdc" : "sol"}`}>
+                              {h.usdcMark ? (
+                                <span className="usdc-mark">$</span>
+                              ) : (
+                                <img src={solanaLogo} alt="" />
+                              )}
+                              <span className={`home-asset-badge ${h.privacy}`}>
+                                {h.privacy === "shielded" ? shield : eye}
+                              </span>
+                            </div>
+                            <div className="home-asset-info">
+                              <div className="home-asset-row">
+                                <span className="home-asset-name">
+                                  {h.name}
+                                  <span className={`home-tag ${h.privacy === "shielded" ? "sh" : ""}`}>
+                                    {h.privacy}
+                                  </span>
+                                </span>
+                                <span className="home-asset-amt">
+                                  {formatBalance(h.amount, h.decimals)} {h.symbol}
+                                </span>
+                              </div>
+                              <div className="home-asset-row">
+                                <span className="home-asset-sub">
+                                  {h.privacy === "shielded" ? "Private · unlinkable" : "Solana"}
+                                </span>
+                                <span className="home-asset-val">
+                                  {usd != null ? fmtUsd(usd) : "—"}
+                                  {usd != null && chg != null && chg !== 0 && (
+                                    <em className={chg >= 0 ? "up" : "down"}>
+                                      {" "}
+                                      {chg >= 0 ? "+" : ""}
+                                      {chg.toFixed(2)}%
+                                    </em>
+                                  )}
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })
+                    )}
+                  </div>
+                </>
+              )
+            })()}
           </>
         ) : bottomTab === "activity" ? (
           <div className="activity-content">
@@ -833,6 +914,18 @@ export function Home({ onLock }: HomeProps) {
                             )
                           }
                           const n = e.n
+                          // A re-shielded SPL note carries a mint; render it with
+                          // the token's decimals/symbol, not the SOL divisor.
+                          const USDC_MINT_DEP =
+                            "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+                          const depSym =
+                            n.mint === USDC_MINT_DEP ? "USDC" : n.mint ? "token" : "SOL"
+                          const depAmount =
+                            n.mint === USDC_MINT_DEP
+                              ? (Number(n.amount) / 1e6).toFixed(4)
+                              : n.mint
+                                ? n.amount
+                                : (Number(n.amount) / 1e9).toFixed(4)
                           return (
                             <div
                               key={n.signature || n.commitment || `dep-${i}`}
@@ -843,8 +936,8 @@ export function Home({ onLock }: HomeProps) {
                                 setActivityDetail({
                                   kind: "deposit",
                                   pending: false,
-                                  amount: `+${(Number(n.amount) / 1e9).toFixed(4)} SOL`,
-                                  sym: "SOL",
+                                  amount: `+${depAmount} ${depSym}`,
+                                  sym: depSym,
                                   address: "",
                                   signature: n.signature,
                                   explorerUrl: `https://explorer.solana.com/tx/${n.signature}?cluster=${network}`,
@@ -868,7 +961,7 @@ export function Home({ onLock }: HomeProps) {
                                 <div className="activity-row">
                                   <span className="activity-title">Deposit</span>
                                   <span className="activity-amount pos">
-                                    +{(Number(n.amount) / 1e9).toFixed(4)} SOL
+                                    +{depAmount} {depSym}
                                   </span>
                                 </div>
                                 <div className="activity-row">
@@ -890,8 +983,9 @@ export function Home({ onLock }: HomeProps) {
               )
             })()}
 
-            {activityDetail && (
-              <div className="detail-overlay" onClick={() => setActivityDetail(null)}>
+            {activityDetail &&
+              createPortal(
+                <div className="detail-overlay" onClick={() => setActivityDetail(null)}>
                 <div className="detail-sheet" onClick={(e) => e.stopPropagation()}>
                   <div className={`detail-title ${activityDetail.pending ? "muted" : ""}`}>
                     {activityDetail.kind === "buy" ? "Private buy" : "Deposit"}
@@ -991,8 +1085,9 @@ export function Home({ onLock }: HomeProps) {
                     </button>
                   </div>
                 </div>
-              </div>
-            )}
+              </div>,
+                document.body
+              )}
           </div>
         ) : (
           /* ─── Settings Tab ─── */

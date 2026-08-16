@@ -1,15 +1,25 @@
-import { Connection, PublicKey } from "@solana/web3.js"
+import { Connection, Keypair, PublicKey } from "@solana/web3.js"
 
 import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
 import { clearSession, getLastActivity, loadSession, recordActivity } from "~lib/storage/session"
 import { addNote, getNotes, markNoteSpentByCommitment, shieldedBalance, shieldedTokenBalances, type ShieldedNote } from "~lib/paraloom/notes"
 import { scanForNotes } from "~lib/paraloom/scan"
-import { solanaAddress } from "~lib/paraloom/bridge"
+import {
+  associatedTokenAddress,
+  depositSpl,
+  recoverReshieldedNote,
+  solanaAddress
+} from "~lib/paraloom/bridge"
 import { fetchV3Leaves } from "~lib/paraloom/transact"
-import { privateSwap, resumeSwapAtFreshAddress } from "~lib/paraloom/privateSwap"
+import {
+  privateSwap,
+  resumeSwapAtFreshAddress,
+  type ReshieldedNote
+} from "~lib/paraloom/privateSwap"
 import { listSwapOutputs, saveSwapOutput } from "~lib/paraloom/swapOutputs"
-import { NATIVE_ASSET_HEX } from "~lib/prover"
+import { persistReshieldedNote, recoverReshields } from "~lib/paraloom/reshieldRecovery"
+import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
 
 // Private swaps are mainnet-only (Jupiter liquidity) and rebuilding the v3 tree
 // needs an archival RPC, so the swap always runs against the node's archival
@@ -363,7 +373,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           connection,
           session.wallet.shieldedAddress
         )
-        sendResponse({ success: true, recovered })
+        const reshielded = await recoverReshields(
+          connection,
+          session.wallet.shieldedAddress
+        ).catch(() => 0)
+        sendResponse({ success: true, recovered: recovered + reshielded })
       })
       .catch((err) => sendResponse({ success: false, error: err.message }))
     return true
@@ -574,17 +588,36 @@ async function handleShieldedBalance(sender: chrome.runtime.MessageSender) {
   if (!session) return { lamports: null }
 
   const addr = session.wallet.shieldedAddress
-  // Best-effort refresh from the node; if it fails we still return whatever
-  // notes have already been scanned into storage.
+  // Return the LOCAL balance immediately. Awaiting scanForNotes here (a node
+  // fetch + a per-note WASM trial-decrypt loop) could run long enough for the
+  // MV3 service worker to be evicted mid-handler, so the page's read never
+  // resolved ("trying to load but can't"). Scan in the BACKGROUND instead; the
+  // next read picks up any newly discovered transfer notes.
+  void backgroundScan(session, addr)
+  const bal = await shieldedBalance(addr)
+  return { lamports: bal.toString() }
+}
+
+// Fire-and-forget transfer-note scan, deduped so overlapping reads do not stack
+// concurrent WASM loops. Never blocks a balance read.
+let scanInFlight = false
+async function backgroundScan(
+  session: Awaited<ReturnType<typeof loadSession>>,
+  addr: string
+): Promise<void> {
+  if (scanInFlight || !session) return
+  scanInFlight = true
   try {
     await scanForNotes(
       addr,
       session.wallet.boxSecretKey,
       Buffer.from(session.wallet.spendPrivkey).toString("hex")
     )
-  } catch {}
-  const bal = await shieldedBalance(addr)
-  return { lamports: bal.toString() }
+  } catch {
+    // node down / no scan endpoint — the local balance still stands
+  } finally {
+    scanInFlight = false
+  }
 }
 
 // Shielded SPL balances per mint (#779), same authorization + refresh as the
@@ -596,13 +629,11 @@ async function handleShieldedTokenBalances(sender: chrome.runtime.MessageSender)
   if (!session) return { balances: {} }
 
   const addr = session.wallet.shieldedAddress
-  try {
-    await scanForNotes(
-      addr,
-      session.wallet.boxSecretKey,
-      Buffer.from(session.wallet.spendPrivkey).toString("hex")
-    )
-  } catch {}
+  // Same as the native balance: return the LOCAL token balances immediately and
+  // scan in the background, so a slow scan can never evict the worker before the
+  // page's read resolves. Re-shielded USDC is a local deposit note, so it shows
+  // without waiting on the scan at all.
+  void backgroundScan(session, addr)
   const balances = await shieldedTokenBalances(addr)
   const out: Record<string, string> = {}
   for (const [mint, amount] of Object.entries(balances)) out[mint] = amount.toString()
@@ -789,7 +820,8 @@ async function resumeStrandedSwaps(
           shieldedAddress,
           o.freshSecretKeyHex,
           o.outputMint,
-          o.reshield ?? false
+          o.reshield ?? false,
+          (note) => persistReshieldedNote(shieldedAddress, note)
         )
         await saveSwapOutput({
           ...o,
@@ -797,16 +829,7 @@ async function resumeStrandedSwaps(
           swapSignature: r.swapSignature
         })
         if (r.reshielded) {
-          await addNote(shieldedAddress, {
-            amount: r.reshielded.amount,
-            blinding: r.reshielded.blindingHex,
-            assetId: r.reshielded.assetId,
-            mint: r.reshielded.mint,
-            signature: r.reshielded.depositSignature,
-            createdAt: Date.now(),
-            spent: false,
-            source: "deposit"
-          })
+          await persistReshieldedNote(shieldedAddress, r.reshielded)
         }
         recovered++
         console.log(`[paraloom] resumed stranded swap at ${o.freshAddress}`)
@@ -844,6 +867,7 @@ async function handlePrivateSwap(
   // but whose swap leg never ran, so stranded funds are recovered rather than
   // accumulating (and so a retry never abandons the previous attempt's SOL).
   await resumeStrandedSwaps(connection, shieldedAddress).catch(() => 0)
+  await recoverReshields(connection, shieldedAddress).catch(() => 0)
 
   const candidates = (await getNotes(shieldedAddress)).filter(
     (n) => !n.spent && n.assetId === NATIVE_ASSET_HEX
@@ -864,7 +888,11 @@ async function handlePrivateSwap(
       amountLamports: amount,
       slippageBps: params.slippageBps ?? 100,
       reshield: params.reshield ?? false
-    }
+    },
+    undefined,
+    // Persist the re-shielded note the instant its deposit is submitted, so a
+    // confirmation timeout or worker eviction cannot orphan the shielded balance.
+    (note) => persistReshieldedNote(shieldedAddress, note)
   )
 
   // The fresh key + output are persisted inside privateSwap the instant the swap
@@ -877,16 +905,7 @@ async function handlePrivateSwap(
   // signature, no commitment); scanning DepositNoteSplEvent later fills its
   // leafIndex for spending, exactly as native deposit notes are resolved.
   if (result.reshielded) {
-    await addNote(shieldedAddress, {
-      amount: result.reshielded.amount,
-      blinding: result.reshielded.blindingHex,
-      assetId: result.reshielded.assetId,
-      mint: result.reshielded.mint,
-      signature: result.reshielded.depositSignature,
-      createdAt: Date.now(),
-      spent: false,
-      source: "deposit"
-    })
+    await persistReshieldedNote(shieldedAddress, result.reshielded)
   }
 
   return {

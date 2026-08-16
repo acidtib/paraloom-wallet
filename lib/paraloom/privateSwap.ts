@@ -215,7 +215,12 @@ async function reshieldToken(
   connection: Connection,
   fresh: Keypair,
   shieldedAddress: string,
-  outputMint: string
+  outputMint: string,
+  // Persist the shielded note the instant the deposit is SUBMITTED, before its
+  // confirmation. The blinding is random and unrecoverable if lost, so this must
+  // not wait for the flow to finish (a worker eviction after the deposit lands
+  // would otherwise orphan a real shielded balance).
+  persistNote?: (note: ReshieldedNote) => Promise<void>
 ): Promise<ReshieldedNote | undefined> {
   try {
     const mint = new PublicKey(outputMint)
@@ -226,17 +231,31 @@ async function reshieldToken(
     const assetId = await assetIdForMint(
       Buffer.from(mint.toBytes()).toString("hex")
     )
+    const mintBase58 = mint.toBase58()
     const dep = await depositSpl(
       connection,
       fresh,
       shieldedAddress,
       mint,
       tokenAmount,
-      assetId
+      assetId,
+      undefined,
+      // onSubmitted: note is now known + on-chain; persist immediately.
+      async (r) => {
+        if (persistNote) {
+          await persistNote({
+            assetId,
+            mint: mintBase58,
+            amount: tokenAmount.toString(),
+            blindingHex: Buffer.from(r.blinding).toString("hex"),
+            depositSignature: r.signature
+          })
+        }
+      }
     )
     return {
       assetId,
-      mint: mint.toBase58(),
+      mint: mintBase58,
       amount: tokenAmount.toString(),
       blindingHex: Buffer.from(dep.blinding).toString("hex"),
       depositSignature: dep.signature
@@ -273,7 +292,10 @@ export async function privateSwap(
   ownBoxPubHex: string,
   inputs: ShieldedNote[],
   params: PrivateSwapParams,
-  ingressToken?: string
+  ingressToken?: string,
+  // Persist the re-shielded note the instant its deposit is submitted, so a
+  // late failure can never orphan a shielded balance that landed on-chain.
+  onReshielded?: (note: ReshieldedNote) => Promise<void>
 ): Promise<PrivateSwapResult> {
   if (params.amountLamports <= 0n) throw new Error("amount must be > 0")
 
@@ -368,7 +390,8 @@ export async function privateSwap(
       connection,
       fresh,
       shieldedAddress,
-      params.outputMint
+      params.outputMint,
+      onReshielded
     )
   }
 
@@ -404,7 +427,8 @@ export async function resumeSwapAtFreshAddress(
   shieldedAddress: string,
   freshSecretKeyHex: string,
   outputMint: string,
-  reshield: boolean
+  reshield: boolean,
+  onReshielded?: (note: ReshieldedNote) => Promise<void>
 ): Promise<ResumeSwapResult> {
   const fresh = Keypair.fromSecretKey(
     Uint8Array.from(Buffer.from(freshSecretKeyHex, "hex"))
@@ -424,7 +448,13 @@ export async function resumeSwapAtFreshAddress(
 
   let reshielded: ReshieldedNote | undefined
   if (reshield && outputMint !== "SOL") {
-    reshielded = await reshieldToken(connection, fresh, shieldedAddress, outputMint)
+    reshielded = await reshieldToken(
+      connection,
+      fresh,
+      shieldedAddress,
+      outputMint,
+      onReshielded
+    )
   }
 
   return { swapSignature, outAmount, reshielded }
