@@ -127,7 +127,7 @@ async function waitForFunding(
     if (bal > 0n) return bal
   }
   throw new Error(
-    "withdraw did not settle within the timeout (the quorum may be slow; the note is unspent and can be retried)"
+    "withdraw is still settling and has not funded the fresh address yet. Do NOT retry — the spent note is already committed and the funds will arrive at the saved address; reopen the wallet to let the swap resume once it lands."
   )
 }
 
