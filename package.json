@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "plasmo dev",
     "build": "plasmo build && node scripts/patch-manifest.mjs",
-    "package": "plasmo build && node scripts/patch-manifest.mjs && cd build/chrome-mv3-prod && zip -r -FS ../paraloom-wallet.zip . -x '*.map'"
+    "package": "plasmo build && node scripts/patch-manifest.mjs && cd build/chrome-mv3-prod && zip -r -FS ../paraloom-wallet.zip . -x '*.map'",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@noble/ed25519": "^2.1.0",
@@ -28,7 +30,8 @@
     "@types/react-dom": "18.3.5",
     "plasmo": "0.89.4",
     "prettier": "3.4.2",
-    "typescript": "5.7.2"
+    "typescript": "5.7.2",
+    "vitest": "2.1.9"
   },
   "manifest": {
     "permissions": [
