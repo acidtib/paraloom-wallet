@@ -1325,14 +1325,8 @@ textarea.input {
 .home-asset:hover { border-color: var(--plm-border-strong); background: var(--plm-bg-elevated); }
 .home-asset-logo { position: relative; width: 40px; height: 40px; flex-shrink: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; overflow: hidden; }
 .home-asset-logo.sol { background: #000; border: 1px solid var(--plm-border-strong); }
-.home-asset-logo.usdc { background: #2775CA; }
+.home-asset-logo.sol img { width: 62%; height: 62%; object-fit: contain; }
 .home-asset-logo img { width: 100%; height: 100%; object-fit: cover; }
-.home-asset-logo .usdc-mark { color: #fff; font-weight: 800; font-size: 15px; font-family: var(--plm-font-display, sans-serif); }
-.home-asset-badge { position: absolute; right: -2px; bottom: -2px; width: 17px; height: 17px; border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 2px solid var(--plm-bg-card); }
-.home-asset:hover .home-asset-badge { border-color: var(--plm-bg-elevated); }
-.home-asset-badge svg { width: 9px; height: 9px; }
-.home-asset-badge.shielded { background: var(--plm-gold); color: #0B0B0E; }
-.home-asset-badge.public { background: var(--plm-bg-elevated); color: var(--text-tertiary); border-color: var(--plm-bg-card); }
 .home-asset-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
 .home-asset-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .home-asset-name { font-size: 13.5px; font-weight: 600; color: var(--text-primary); display: flex; align-items: center; gap: 6px; }

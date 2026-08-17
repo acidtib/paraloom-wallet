@@ -27,6 +27,7 @@ import { QRCodeSVG } from "qrcode.react"
 
 import logoImg from "data-base64:~/../assets/icon.png"
 import solanaLogo from "data-base64:~/../assets/solana.svg"
+import usdcLogo from "data-base64:~/../assets/usdc.svg"
 
 const AUTO_LOCK_OPTIONS: { value: number; label: string }[] = [
   { value: 5, label: "5 minutes" },
@@ -749,14 +750,7 @@ export function Home({ onLock }: HomeProps) {
                         return (
                           <div className="home-asset" key={h.key}>
                             <div className={`home-asset-logo ${h.usdcMark ? "usdc" : "sol"}`}>
-                              {h.usdcMark ? (
-                                <span className="usdc-mark">$</span>
-                              ) : (
-                                <img src={solanaLogo} alt="" />
-                              )}
-                              <span className={`home-asset-badge ${h.privacy}`}>
-                                {h.privacy === "shielded" ? shield : eye}
-                              </span>
+                              <img src={h.usdcMark ? usdcLogo : solanaLogo} alt="" />
                             </div>
                             <div className="home-asset-info">
                               <div className="home-asset-row">
