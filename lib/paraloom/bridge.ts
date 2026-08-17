@@ -201,8 +201,7 @@ export async function depositSpl(
     tokenProgram
   )
   const tx = new Transaction().add(ix)
-  const { blockhash, lastValidBlockHeight } =
-    await connection.getLatestBlockhash("confirmed")
+  const { blockhash } = await connection.getLatestBlockhash("confirmed")
   tx.recentBlockhash = blockhash
   tx.feePayer = depositor.publicKey
   tx.sign(depositor)
@@ -220,10 +219,9 @@ export async function depositSpl(
       // Persisting is best-effort here; the recovery scan is the backstop.
     }
   }
-  await connection.confirmTransaction(
-    { signature, blockhash, lastValidBlockHeight },
-    "confirmed"
-  )
+  // Tolerant confirm (not the hard blockhash deadline): a busy mainnet must not
+  // throw "block height exceeded" on a deposit that actually lands.
+  await confirmBySignatureStatus(connection, signature)
 
   return result
 }
@@ -252,6 +250,36 @@ export function buildCreateAtaIdempotentInstruction(
   })
 }
 
+// Confirm a wallet-submitted tx WITHOUT the hard blockhash deadline that
+// connection.confirmTransaction enforces. On a busy mainnet that deadline throws
+// "block height exceeded" even when the tx confirms a moment later (observed
+// aborting a private swap right after the ATA it created had actually landed).
+// Polls the signature status instead, tolerating a slow confirmation and only
+// rejecting on a real on-chain error. Returns false on a true timeout.
+export async function confirmBySignatureStatus(
+  connection: Connection,
+  signature: string,
+  timeoutMs = 90_000
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const st = await connection.getSignatureStatus(signature, {
+      searchTransactionHistory: true
+    })
+    const v = st.value
+    if (v) {
+      if (v.err) {
+        throw new Error(`transaction failed on-chain: ${JSON.stringify(v.err)}`)
+      }
+      if (v.confirmationStatus === "confirmed" || v.confirmationStatus === "finalized") {
+        return true
+      }
+    }
+    await new Promise((r) => setTimeout(r, 2000))
+  }
+  return false
+}
+
 // Create `owner`'s associated token account for `mint` on-chain (idempotent),
 // paid and signed by `payer`. Needed before a shielded SPL note can be withdrawn
 // to it: the on-chain `transact_spl` withdraw transfers into an EXISTING token
@@ -264,18 +292,25 @@ export async function createTokenAccount(
   tokenProgram: PublicKey = new PublicKey(TOKEN_PROGRAM_ID)
 ): Promise<PublicKey> {
   const ata = associatedTokenAddress(owner, mint, tokenProgram)
+  // Already there (e.g. a resumed swap, or a late-confirmed prior attempt)? Done.
+  if (await connection.getAccountInfo(ata, "confirmed")) return ata
+
   const ix = buildCreateAtaIdempotentInstruction(payer.publicKey, owner, mint, tokenProgram)
   const tx = new Transaction().add(ix)
-  const { blockhash, lastValidBlockHeight } =
-    await connection.getLatestBlockhash("confirmed")
+  const { blockhash } = await connection.getLatestBlockhash("confirmed")
   tx.recentBlockhash = blockhash
   tx.feePayer = payer.publicKey
   tx.sign(payer)
   const sig = await connection.sendRawTransaction(tx.serialize(), { maxRetries: 5 })
-  await connection.confirmTransaction(
-    { signature: sig, blockhash, lastValidBlockHeight },
-    "confirmed"
-  )
+  const confirmed = await confirmBySignatureStatus(connection, sig)
+  if (!confirmed) {
+    // Fell past the confirm window on a busy mainnet. CreateIdempotent is safe to
+    // treat as done if the account now exists — the tx may simply have confirmed
+    // late. Only fail if it truly is not there.
+    if (!(await connection.getAccountInfo(ata, "confirmed"))) {
+      throw new Error("ATA creation did not confirm in time")
+    }
+  }
   return ata
 }
 

@@ -14,10 +14,10 @@ import {
   SystemProgram,
   Transaction,
   TransactionInstruction,
-  sendAndConfirmTransaction,
   type Keypair
 } from "@solana/web3.js"
 
+import { confirmBySignatureStatus } from "./bridge"
 import {
   BRIDGE_STATE_SEED,
   BRIDGE_VAULT_SEED,
@@ -83,7 +83,18 @@ export async function sendDepositNote(
   const tx = new Transaction().add(
     depositNoteInstruction(payer.publicKey, amountLamports, pubkey, blinding)
   )
-  return sendAndConfirmTransaction(connection, tx, [payer])
+  const { blockhash } = await connection.getLatestBlockhash("confirmed")
+  tx.recentBlockhash = blockhash
+  tx.feePayer = payer.publicKey
+  tx.sign(payer)
+  // Tolerant confirm (not the hard blockhash deadline): a busy mainnet must not
+  // throw "block height exceeded" on a deposit that actually lands, which would
+  // orphan the note's blinding before it is persisted.
+  const signature = await connection.sendRawTransaction(tx.serialize(), {
+    maxRetries: 5
+  })
+  await confirmBySignatureStatus(connection, signature)
+  return signature
 }
 
 export interface V3Leaf {
