@@ -62,7 +62,7 @@ export async function saveEncryptedWallet(
     [STORAGE_KEY]: {
       wallet: data,
       locked: true,
-      autoLockMinutes: 15
+      autoLockMinutes: 60
     }
   })
 }
@@ -120,7 +120,7 @@ export async function setLockState(locked: boolean): Promise<void> {
 export async function getAutoLockMinutes(): Promise<number> {
   const result = await chrome.storage.local.get(STORAGE_KEY)
   const storage = result[STORAGE_KEY] as WalletStorage | undefined
-  return storage?.autoLockMinutes ?? 15
+  return storage?.autoLockMinutes ?? 60
 }
 
 export async function setAutoLockMinutes(minutes: number): Promise<void> {

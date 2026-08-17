@@ -34,8 +34,11 @@ const AUTO_LOCK_OPTIONS: { value: number; label: string }[] = [
   { value: 5, label: "5 minutes" },
   { value: 15, label: "15 minutes" },
   { value: 30, label: "30 minutes" },
-  { value: 60, label: "1 hour" }
+  { value: 60, label: "1 hour" },
+  { value: 120, label: "2 hours" },
+  { value: 240, label: "4 hours" }
 ]
+const DEFAULT_AUTO_LOCK_MINUTES = 60
 
 interface Token {
   symbol: string
@@ -103,7 +106,7 @@ export function Home({ onLock }: HomeProps) {
 
   // Settings state
   const [network, setNetworkState] = useState<"mainnet-beta" | "devnet">("mainnet-beta")
-  const [autoLock, setAutoLock] = useState(15)
+  const [autoLock, setAutoLock] = useState(DEFAULT_AUTO_LOCK_MINUTES)
   const [autoLockOpen, setAutoLockOpen] = useState(false)
   const [showPKModal, setShowPKModal] = useState(false)
   const [showSeedModal, setShowSeedModal] = useState(false)
