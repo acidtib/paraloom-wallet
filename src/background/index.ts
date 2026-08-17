@@ -41,8 +41,26 @@ let connectedOrigin: string | null = null
 // dead past the threshold locks the moment it wakes.
 const AUTO_LOCK_ALARM = "paraloom-auto-lock"
 
+// A swap can run for minutes (two 2-of-2 settlements + the route + re-shield);
+// locking mid-flight would clear the very session it depends on and strand the
+// job (the page then polls a dead, unauthorized status: "Private swap timed
+// out"). Hold the auto-lock off while a swap is genuinely in flight, bounded so
+// a hung job can never block the lock forever.
+const SWAP_INFLIGHT_LOCK_GRACE_MS = 8 * 60 * 1000
+async function swapInFlight(): Promise<boolean> {
+  const job = (await chrome.storage.session.get("swapJob")).swapJob as
+    | SwapJob
+    | undefined
+  return (
+    job?.status === "pending" &&
+    typeof job.startedAt === "number" &&
+    Date.now() - job.startedAt < SWAP_INFLIGHT_LOCK_GRACE_MS
+  )
+}
+
 async function maybeAutoLock(): Promise<void> {
   if (await isWalletLocked()) return
+  if (await swapInFlight()) return
   const last = await getLastActivity()
   if (last === null) {
     // Unlocked but no timestamp yet (e.g. a legacy session): start the clock
@@ -366,7 +384,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     isAuthorizedSender(sender)
       .then((ok) => {
         if (!ok) return sendResponse({ success: false, error: "not authorized" })
-        void setSwapJob({ status: "pending" })
+        void setSwapJob({ status: "pending", startedAt: Date.now() })
         void runSwapJob(message.params, sender)
         sendResponse({ success: true, pending: true })
       })
@@ -722,6 +740,9 @@ interface SwapJob {
   status: "pending" | "done" | "error"
   result?: unknown
   error?: string
+  /** When a "pending" job started, so the auto-lock can hold off while a swap is
+   *  genuinely in flight without a hung job blocking the lock forever. */
+  startedAt?: number
 }
 async function setSwapJob(job: SwapJob): Promise<void> {
   await chrome.storage.session.set({ swapJob: job }).catch(() => {})
@@ -736,6 +757,10 @@ async function runSwapJob(
   sender: chrome.runtime.MessageSender
 ): Promise<void> {
   try {
+    // Starting a swap is activity: reset the idle clock so the 15-min auto-lock
+    // measured from the LAST popup interaction can't fire in the middle of a
+    // swap driven entirely from the dapp (popup closed).
+    void recordActivity(Date.now())
     const origin = senderOrigin(sender)
     if (!origin) {
       await setSwapJob({ status: "error", error: "unknown origin" })
