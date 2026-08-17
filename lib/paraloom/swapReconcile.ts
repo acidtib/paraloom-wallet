@@ -79,12 +79,21 @@ export async function reconcileSwapOutputs(
         }
       }
 
-      const action = classifyStrand({
+      let action = classifyStrand({
         hasSignature: false,
         ageMs: now - o.createdAt,
         solLamports,
         tokenAmount
       })
+
+      // A "SOL" output means this was a token -> SOL swap (or its stranded gas
+      // leg): the SOL at the fresh address is the OUTPUT, never a SOL input to
+      // swap again, so never resume it (that would route SOL -> SOL). Record the
+      // SOL as landed instead; it is real and recoverable with the saved key.
+      if (action === "resume" && o.outputMint === "SOL") {
+        action = "landed"
+        tokenAmount = solLamports
+      }
 
       if (action === "resume") {
         try {

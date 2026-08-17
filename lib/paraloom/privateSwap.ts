@@ -26,11 +26,11 @@ import {
 
 import { assetIdForMint } from "~lib/prover"
 
-import { associatedTokenAddress, depositSpl } from "./bridge"
+import { associatedTokenAddress, createTokenAccount, depositSpl } from "./bridge"
 import { SWAP_ROUTER_URL } from "./constants"
 import type { ShieldedNote } from "./notes"
 import { saveSwapOutput } from "./swapOutputs"
-import { spendV3 } from "./transactFlow"
+import { depositV3, spendV3 } from "./transactFlow"
 
 /** Lamports left at the fresh address to cover the swap's own costs: the output
  *  token ATA rent (~0.00204), the fresh account's rent-exempt floor (~0.00089),
@@ -145,7 +145,8 @@ async function fetchWithTimeout(
 async function routeSwap(
   freshPubkey: string,
   outputMint: string,
-  swapLamports: bigint
+  amount: bigint,
+  inputMint = "SOL"
 ): Promise<{ out_amount: number; swap_transaction: string }> {
   let lastErr: unknown
   for (let attempt = 1; attempt <= ROUTE_RETRIES; attempt++) {
@@ -156,9 +157,9 @@ async function routeSwap(
           method: "POST",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
-            input_mint: "SOL",
+            input_mint: inputMint,
             output_mint: outputMint,
-            amount: Number(swapLamports),
+            amount: Number(amount),
             user_public_key: freshPubkey
           })
         },
@@ -386,6 +387,191 @@ export async function privateSwap(
   //    funds. Skipped for a "SOL" output (re-shielding native SOL is pointless).
   let reshielded: ReshieldedNote | undefined
   if (params.reshield && params.outputMint !== "SOL") {
+    reshielded = await reshieldToken(
+      connection,
+      fresh,
+      shieldedAddress,
+      params.outputMint,
+      onReshielded
+    )
+  }
+
+  return {
+    freshAddress: fresh.publicKey.toBase58(),
+    freshSecretKey: fresh.secretKey,
+    withdrawRequestId: requestId,
+    swapSignature,
+    outAmount: out_amount,
+    reshielded
+  }
+}
+
+/** Shielded SOL withdrawn to self-fund a token swap's gas (Plan A′): the
+ *  input-mint ATA rent (~0.00204), the fresh account rent floor, the swap tx +
+ *  priority fees, and the re-shield deposit tx. Comes from the user's OWN
+ *  shielded SOL, so no third party ever pays and the swap stays fully private.
+ *  The unused remainder is swept back into the pool by the re-shield. */
+export const GAS_LAMPORTS = 9_000_000n
+/** Left at the fresh address to pay the re-shield deposit tx when sweeping the
+ *  swapped SOL back into the pool. */
+const RESHIELD_FEE_RESERVE = 1_000_000n
+
+// Poll an SPL token account until the withdrawn balance actually lands.
+async function waitForTokenFunding(
+  connection: Connection,
+  ata: PublicKey
+): Promise<bigint> {
+  const deadline = Date.now() + SETTLE_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, SETTLE_POLL_MS))
+    try {
+      const bal = await connection.getTokenAccountBalance(ata)
+      const amt = BigInt(bal.value.amount)
+      if (amt > 0n) return amt
+    } catch {
+      // The ATA may not be indexed for a moment after creation — keep polling.
+    }
+  }
+  throw new Error(
+    "token withdraw is still settling and has not funded the fresh address yet. Do NOT retry — the spent note is already committed and the funds will arrive at the saved address; reopen the wallet to let the swap resume once it lands."
+  )
+}
+
+export interface PrivateSwapFromTokenParams {
+  /** Input token mint (base58) whose shielded note is spent. */
+  inputMint: string
+  /** Amount of the input token to spend, in the input mint's base units. */
+  amountTokenUnits: bigint
+  /** Output mint (base58) or the literal "SOL". */
+  outputMint: string
+  slippageBps?: number
+  /** Re-shield the swapped output back into the pool (a round trip). For a "SOL"
+   *  output this sweeps the swapped SOL back as a native shielded note. */
+  reshield?: boolean
+}
+
+/**
+ * Private swap FROM a shielded SPL token (e.g. USDC -> SOL). The withdrawn token
+ * cannot pay its own swap gas, so the swap self-funds gas from the user's own
+ * shielded SOL (Plan A′) — no third-party fee-payer, full privacy. Flow:
+ *   1. withdraw a little shielded SOL to the fresh address (gas),
+ *   2. create the input-mint ATA there (paid from that SOL),
+ *   3. withdraw the shielded token note(s) into that ATA,
+ *   4. route + sign + submit the token->output swap for the fresh address,
+ *   5. (reshield) sweep the swapped output back into the pool.
+ * Every leg exits at the SAME fresh, unlinkable address, and both withdrawals
+ * leave the shielded pool with no on-chain tie back to the funding wallet.
+ */
+export async function privateSwapFromToken(
+  connection: Connection,
+  shieldedAddress: string,
+  spendPrivkeyHex: string,
+  ownBoxPubHex: string,
+  tokenInputs: ShieldedNote[],
+  gasInputs: ShieldedNote[],
+  params: PrivateSwapFromTokenParams,
+  ingressToken?: string,
+  onReshielded?: (note: ReshieldedNote) => Promise<void>
+): Promise<PrivateSwapResult> {
+  if (params.amountTokenUnits <= 0n) throw new Error("amount must be > 0")
+
+  const inputMintPk = new PublicKey(params.inputMint)
+  const fresh = Keypair.generate()
+  const freshHex = Buffer.from(fresh.publicKey.toBytes()).toString("hex")
+  const ata = associatedTokenAddress(fresh.publicKey, inputMintPk)
+
+  // Persist the fresh key up front — the gas SOL, the withdrawn token, and the
+  // swapped output all live at this address and are spendable only with this key.
+  await saveSwapOutput({
+    freshAddress: fresh.publicKey.toBase58(),
+    freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    outputMint: params.outputMint,
+    outAmount: 0,
+    swapSignature: "",
+    reshield: params.reshield ?? false,
+    createdAt: Date.now()
+  })
+
+  // 1. Self-fund gas from the user's own shielded SOL (native withdraw).
+  await spendV3(
+    connection,
+    shieldedAddress,
+    spendPrivkeyHex,
+    ownBoxPubHex,
+    gasInputs,
+    GAS_LAMPORTS,
+    { kind: "withdraw", recipientSolanaHex: freshHex },
+    ingressToken
+  )
+  await waitForFunding(connection, fresh.publicKey)
+
+  // 2. Create the input-mint ATA at the fresh address (paid from the gas SOL).
+  //    The on-chain transact_spl withdraw transfers into an EXISTING account.
+  await createTokenAccount(connection, fresh, fresh.publicKey, inputMintPk)
+
+  // 3. Withdraw the shielded token note(s) INTO that ATA — the circuit recipient
+  //    is the token account, not the wallet address.
+  const ataHex = Buffer.from(ata.toBytes()).toString("hex")
+  const { requestId } = await spendV3(
+    connection,
+    shieldedAddress,
+    spendPrivkeyHex,
+    ownBoxPubHex,
+    tokenInputs,
+    params.amountTokenUnits,
+    { kind: "withdraw", recipientSolanaHex: ataHex },
+    ingressToken
+  )
+  const tokenLanded = await waitForTokenFunding(connection, ata)
+
+  // 4. Route the ACTUAL landed token amount (net of the withdraw fee) into the
+  //    output for the fresh address, then sign locally and submit.
+  const { out_amount, swap_transaction } = await routeSwap(
+    fresh.publicKey.toBase58(),
+    params.outputMint,
+    tokenLanded,
+    params.inputMint
+  )
+  const tx = VersionedTransaction.deserialize(
+    Uint8Array.from(Buffer.from(swap_transaction, "base64"))
+  )
+  tx.sign([fresh])
+  const swapSignature = await connection.sendRawTransaction(tx.serialize(), {
+    maxRetries: 5
+  })
+
+  await saveSwapOutput({
+    freshAddress: fresh.publicKey.toBase58(),
+    freshSecretKeyHex: Buffer.from(fresh.secretKey).toString("hex"),
+    outputMint: params.outputMint,
+    outAmount: out_amount,
+    swapSignature,
+    createdAt: Date.now()
+  })
+  await waitForSwapConfirmation(connection, swapSignature)
+
+  // 5. Round trip: sweep the swapped output back into the shielded pool. For a
+  //    "SOL" output this is a native deposit_note (depositV3 persists the note
+  //    itself). Best-effort: on failure the output stays at the fresh address as
+  //    a private buy, recoverable with its saved key.
+  let reshielded: ReshieldedNote | undefined
+  if (params.reshield && params.outputMint === "SOL") {
+    try {
+      const solBal = BigInt(await connection.getBalance(fresh.publicKey))
+      const reshieldLamports = solBal - RESHIELD_FEE_RESERVE
+      if (reshieldLamports > 0n) {
+        await depositV3(
+          connection,
+          { secretKey: fresh.secretKey },
+          shieldedAddress,
+          spendPrivkeyHex,
+          reshieldLamports
+        )
+      }
+    } catch {
+      // leave the swapped SOL as a private buy at the fresh address
+    }
+  } else if (params.reshield && params.outputMint !== "SOL") {
     reshielded = await reshieldToken(
       connection,
       fresh,

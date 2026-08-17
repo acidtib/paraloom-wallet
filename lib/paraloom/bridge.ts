@@ -228,6 +228,57 @@ export async function depositSpl(
   return result
 }
 
+// Build the Associated Token Account program's CreateIdempotent instruction:
+// creates `owner`'s ATA for `mint`, paid by `payer`, and no-ops if the account
+// already exists. Data is the single discriminator byte 1 (CreateIdempotent).
+export function buildCreateAtaIdempotentInstruction(
+  payer: PublicKey,
+  owner: PublicKey,
+  mint: PublicKey,
+  tokenProgram: PublicKey = new PublicKey(TOKEN_PROGRAM_ID)
+): TransactionInstruction {
+  const ata = associatedTokenAddress(owner, mint, tokenProgram)
+  return new TransactionInstruction({
+    programId: new PublicKey(ASSOCIATED_TOKEN_PROGRAM_ID),
+    keys: [
+      { pubkey: payer, isSigner: true, isWritable: true },
+      { pubkey: ata, isSigner: false, isWritable: true },
+      { pubkey: owner, isSigner: false, isWritable: false },
+      { pubkey: mint, isSigner: false, isWritable: false },
+      { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+      { pubkey: tokenProgram, isSigner: false, isWritable: false }
+    ],
+    data: Buffer.from([1])
+  })
+}
+
+// Create `owner`'s associated token account for `mint` on-chain (idempotent),
+// paid and signed by `payer`. Needed before a shielded SPL note can be withdrawn
+// to it: the on-chain `transact_spl` withdraw transfers into an EXISTING token
+// account, it does not create one. Returns the ATA address.
+export async function createTokenAccount(
+  connection: Connection,
+  payer: Keypair,
+  owner: PublicKey,
+  mint: PublicKey,
+  tokenProgram: PublicKey = new PublicKey(TOKEN_PROGRAM_ID)
+): Promise<PublicKey> {
+  const ata = associatedTokenAddress(owner, mint, tokenProgram)
+  const ix = buildCreateAtaIdempotentInstruction(payer.publicKey, owner, mint, tokenProgram)
+  const tx = new Transaction().add(ix)
+  const { blockhash, lastValidBlockHeight } =
+    await connection.getLatestBlockhash("confirmed")
+  tx.recentBlockhash = blockhash
+  tx.feePayer = payer.publicKey
+  tx.sign(payer)
+  const sig = await connection.sendRawTransaction(tx.serialize(), { maxRetries: 5 })
+  await connection.confirmTransaction(
+    { signature: sig, blockhash, lastValidBlockHeight },
+    "confirmed"
+  )
+  return ata
+}
+
 function hexToBytes(hex: string): Uint8Array {
   return Uint8Array.from(Buffer.from(hex, "hex"))
 }

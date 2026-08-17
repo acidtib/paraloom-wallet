@@ -1,4 +1,4 @@
-import { Connection } from "@solana/web3.js"
+import { Connection, PublicKey } from "@solana/web3.js"
 
 import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
@@ -13,7 +13,9 @@ import {
 } from "~lib/paraloom/bridge"
 import { fetchV3Leaves } from "~lib/paraloom/transact"
 import {
+  GAS_LAMPORTS,
   privateSwap,
+  privateSwapFromToken,
   type ReshieldedNote
 } from "~lib/paraloom/privateSwap"
 import { persistReshieldedNote, recoverReshields } from "~lib/paraloom/reshieldRecovery"
@@ -79,11 +81,16 @@ let connectionIdCounter = 0
 // is outstanding at a time.
 interface SwapRequestParams {
   outputMint: string
-  /** lamports as a decimal string (BigInt doesn't cross the message bridge). */
+  /** Input token mint (base58) whose shielded note is spent. Absent or "SOL"
+   *  means the classic native-SOL input (SOL -> token). Any other mint spends a
+   *  shielded SPL note (e.g. USDC -> SOL), self-funding gas from shielded SOL. */
+  inputMint?: string
+  /** Amount to spend, as a decimal string (BigInt doesn't cross the message
+   *  bridge). Lamports for a SOL input, the input mint's base units otherwise. */
   amountLamports: string
   slippageBps?: number
-  /** Round trip (#779): re-shield the swapped token instead of leaving it at
-   *  the fresh address. Ignored for a "SOL" output. */
+  /** Round trip (#779): re-shield the swapped output back into the pool instead
+   *  of leaving it at the fresh address. */
   reshield?: boolean
 }
 let pendingSwap:
@@ -803,6 +810,66 @@ async function handlePrivateSwap(
   // accumulating (and so a retry never abandons the previous attempt's SOL).
   await reconcileSwapOutputs(connection, shieldedAddress).catch(() => 0)
   await recoverReshields(connection, shieldedAddress).catch(() => 0)
+
+  // Token-input swap (e.g. USDC -> SOL): spend a shielded SPL note and self-fund
+  // gas from the user's own shielded SOL (Plan A′, full privacy).
+  if (params.inputMint && params.inputMint !== "SOL") {
+    const inputAssetId = await assetIdForMint(
+      new PublicKey(params.inputMint).toBuffer().toString("hex")
+    )
+    const allNotes = await getNotes(shieldedAddress)
+    const tokenCandidates = allNotes.filter(
+      (n) => !n.spent && n.assetId === inputAssetId
+    )
+    const tokenInputs = selectNotes(tokenCandidates, amount)
+    const nativeCandidates = allNotes.filter(
+      (n) => !n.spent && n.assetId === NATIVE_ASSET_HEX
+    )
+    const gasNotes = await dropPhantomNotes(
+      connection,
+      shieldedAddress,
+      nativeCandidates
+    )
+    let gasInputs: ShieldedNote[]
+    try {
+      gasInputs = selectNotes(gasNotes, GAS_LAMPORTS)
+    } catch {
+      throw new Error(
+        "This swap needs a little shielded SOL to pay gas privately. Deposit about 0.01 SOL and shield it, then try again."
+      )
+    }
+
+    const tokenResult = await privateSwapFromToken(
+      connection,
+      shieldedAddress,
+      spendPrivkeyHex,
+      ownBoxPubHex,
+      tokenInputs,
+      gasInputs,
+      {
+        inputMint: params.inputMint,
+        amountTokenUnits: amount,
+        outputMint: params.outputMint,
+        slippageBps: params.slippageBps ?? 100,
+        reshield: params.reshield ?? true
+      },
+      undefined,
+      (note) => persistReshieldedNote(shieldedAddress, note)
+    )
+    void recordActivity(Date.now())
+    if (tokenResult.reshielded) {
+      await persistReshieldedNote(shieldedAddress, tokenResult.reshielded)
+    }
+    return {
+      success: true,
+      data: {
+        freshAddress: tokenResult.freshAddress,
+        swapSignature: tokenResult.swapSignature,
+        outAmount: tokenResult.outAmount,
+        reshielded: tokenResult.reshielded !== undefined
+      }
+    }
+  }
 
   const candidates = (await getNotes(shieldedAddress)).filter(
     (n) => !n.spent && n.assetId === NATIVE_ASSET_HEX

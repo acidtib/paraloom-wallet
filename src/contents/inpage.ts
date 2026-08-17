@@ -84,8 +84,10 @@ if (!(window as any).paraloom) {
     // wallet popup; resolves to { freshAddress, swapSignature, outAmount }.
     privateSwap: async (params: {
       outputMint: string
+      inputMint?: string
       amountLamports: string
       slippageBps?: number
+      reshield?: boolean
     }) => {
       // Kick off the swap job (opens the approval popup), then POLL its status.
       // The polling keeps the MV3 worker alive through the approval + the
