@@ -290,6 +290,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true
   }
 
+  // A connected dapp asks us to surface the wallet's OWN unlock screen so the
+  // user can unlock without hunting for the extension icon. We only open our
+  // popup window (the password is entered in the extension, NEVER sent from the
+  // page); a no-op if already unlocked. Gated to approved origins.
+  if (message.type === "REQUEST_UNLOCK") {
+    isAuthorizedSender(sender)
+      .then(async (ok) => {
+        if (!ok) return sendResponse({ success: false, error: "not authorized" })
+        const locked = !(await loadSession())
+        if (locked) await openWalletWindow()
+        sendResponse({ success: true, locked })
+      })
+      .catch((err) => sendResponse({ success: false, error: err.message }))
+    return true
+  }
+
   if (message.type === "GET_PUBLIC_ADDRESS") {
     handlePublicAddress(sender).then(sendResponse).catch(() => {
       sendResponse({ address: null })

@@ -140,6 +140,14 @@ if (!(window as any).paraloom) {
       const r = await relay("IS_CONNECTED")
       return r?.locked ?? false
     },
+    // Surface the wallet's own unlock screen (opens the extension popup on the
+    // password prompt). The password is entered in the extension, never here.
+    // No-op if already unlocked. The dapp then polls isLocked() to see the
+    // result. Resolves to the lock state the wallet observed when asked.
+    unlock: async () => {
+      const r = await relay("REQUEST_UNLOCK").catch(() => null)
+      return r?.locked ?? false
+    },
     // Finish any earlier private swap whose withdraw settled but whose swap leg
     // never completed (funds stranded at the fresh address). Safe to call on
     // connect; resolves to the number recovered (0 if nothing to do).
