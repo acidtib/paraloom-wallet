@@ -872,7 +872,13 @@ export function Home({ onLock }: HomeProps) {
                           if (e.kind === "buy") {
                             const s = e.s
                             const done = s.outAmount > 0 && !!s.swapSignature
-                            const sym = s.outputMint === USDC_MINT ? "USDC" : "token"
+                            const sym =
+                              s.outputMint === "SOL"
+                                ? "SOL"
+                                : s.outputMint === USDC_MINT
+                                  ? "USDC"
+                                  : "token"
+                            const outDiv = s.outputMint === "SOL" ? 1e9 : 1e6
                             return (
                               <div
                                 key={s.freshAddress || `buy-${i}`}
@@ -883,7 +889,9 @@ export function Home({ onLock }: HomeProps) {
                                   setActivityDetail({
                                     kind: "buy",
                                     pending: !done,
-                                    amount: done ? `+${(s.outAmount / 1e6).toFixed(4)} ${sym}` : "",
+                                    amount: done
+                                      ? `+${(s.outAmount / outDiv).toFixed(4)} ${sym}`
+                                      : "",
                                     sym,
                                     address: s.freshAddress,
                                     signature: s.swapSignature || "",
@@ -917,7 +925,7 @@ export function Home({ onLock }: HomeProps) {
                                     <span className="activity-title">Private buy</span>
                                     {done ? (
                                       <span className="activity-amount pos">
-                                        +{(s.outAmount / 1e6).toFixed(4)} {sym}
+                                        +{(s.outAmount / outDiv).toFixed(4)} {sym}
                                       </span>
                                     ) : (
                                       <span className="activity-pill">Pending</span>

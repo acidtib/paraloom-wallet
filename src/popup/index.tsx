@@ -12,7 +12,13 @@ import { Unlock } from "~src/popup/Unlock"
 interface PendingSwap {
   id: number
   origin: string
-  params: { outputMint: string; amountLamports: string; slippageBps?: number }
+  params: {
+    outputMint: string
+    inputMint?: string
+    amountLamports: string
+    slippageBps?: number
+    reshield?: boolean
+  }
 }
 
 import "./style.css"

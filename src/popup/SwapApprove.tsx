@@ -3,8 +3,10 @@ import logoImg from "data-base64:~/../assets/icon.png"
 
 interface SwapParams {
   outputMint: string
+  inputMint?: string
   amountLamports: string
   slippageBps?: number
+  reshield?: boolean
 }
 
 interface SwapApproveProps {
@@ -28,13 +30,20 @@ function tokenLabel(mint: string): string {
   return `${mint.slice(0, 4)}…${mint.slice(-4)}`
 }
 
-function formatSol(lamports: string): string {
+// Decimals + symbol for the input side. Only native SOL and USDC are spendable
+// inputs today; an unknown mint falls back to showing raw base units.
+function inputInfo(inputMint?: string): { decimals: number; symbol: string } {
+  if (!inputMint || inputMint === "SOL") return { decimals: 9, symbol: "SOL" }
+  if (inputMint === USDC_MINT) return { decimals: 6, symbol: "USDC" }
+  return { decimals: 0, symbol: tokenLabel(inputMint) }
+}
+
+function formatAmount(amount: string, decimals: number): string {
   try {
-    // Keep it exact-ish for display: lamports / 1e9 with up to 4 decimals.
-    const n = Number(BigInt(lamports)) / 1e9
+    const n = decimals === 0 ? Number(BigInt(amount)) : Number(BigInt(amount)) / 10 ** decimals
     return n.toLocaleString(undefined, { maximumFractionDigits: 6 })
   } catch {
-    return lamports
+    return amount
   }
 }
 
@@ -87,11 +96,17 @@ export function SwapApprove({ id, origin, params, onResolved }: SwapApproveProps
       <h2 className="connect-title">Approve private swap</h2>
       <div className="connect-origin">{host}</div>
       <p className="connect-desc">
-        This spends <strong>{formatSol(params.amountLamports)} SOL</strong> from
-        your shielded balance, exits to a fresh unlinkable address, and buys{" "}
-        <strong>{tokenLabel(params.outputMint)}</strong> there. The bought token
-        stays at that address (it is not re-shielded). Only approve swaps you
-        started.
+        This spends{" "}
+        <strong>
+          {formatAmount(params.amountLamports, inputInfo(params.inputMint).decimals)}{" "}
+          {inputInfo(params.inputMint).symbol}
+        </strong>{" "}
+        from your shielded balance, exits to a fresh unlinkable address, and swaps
+        to <strong>{tokenLabel(params.outputMint)}</strong> there.{" "}
+        {params.reshield
+          ? "The result is re-shielded back into your Paraloom balance."
+          : "The result stays at that address (it is not re-shielded)."}{" "}
+        Only approve swaps you started.
       </p>
       <div className="connect-actions">
         <button className="button button-secondary" onClick={() => decide(false)}>
