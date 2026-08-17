@@ -1,4 +1,4 @@
-import { Connection, Keypair, PublicKey } from "@solana/web3.js"
+import { Connection } from "@solana/web3.js"
 
 import { getAutoLockMinutes, getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
 import { addApprovedOrigin, isOriginApproved, removeApprovedOrigin } from "~lib/storage/connections"
@@ -14,11 +14,10 @@ import {
 import { fetchV3Leaves } from "~lib/paraloom/transact"
 import {
   privateSwap,
-  resumeSwapAtFreshAddress,
   type ReshieldedNote
 } from "~lib/paraloom/privateSwap"
-import { listSwapOutputs, saveSwapOutput } from "~lib/paraloom/swapOutputs"
 import { persistReshieldedNote, recoverReshields } from "~lib/paraloom/reshieldRecovery"
+import { reconcileSwapOutputs } from "~lib/paraloom/swapReconcile"
 import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
 
 // Private swaps are mainnet-only (Jupiter liquidity) and rebuilding the v3 tree
@@ -369,7 +368,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const session = await loadSession()
         if (!session) return sendResponse({ success: false, error: "locked" })
         const connection = new Connection(PRIVATE_SWAP_RPC_URL, "confirmed")
-        const recovered = await resumeStrandedSwaps(
+        const recovered = await reconcileSwapOutputs(
           connection,
           session.wallet.shieldedAddress
         )
@@ -783,70 +782,6 @@ async function dropPhantomNotes(
   return notes.filter((n) => !(n.commitment && dropped.has(n.commitment)))
 }
 
-// Minimum lamports a stranded fresh address must hold to be worth resuming
-// (must clear the swap's on-chain-cost reserve; below it there is nothing to
-// swap). Mirrors SWAP_OVERHEAD_LAMPORTS in privateSwap.
-const RESUME_MIN_LAMPORTS = 6_000_000
-const RESUME_GRACE_MS = 120_000
-
-// Recover swaps whose withdraw settled but whose swap leg never completed. Such
-// an entry has an empty swapSignature and a fresh address that still holds the
-// withdrawn SOL (the swap leg hung or errored after the withdraw landed, so the
-// page timed out with the funds stranded). We finish the swap with the saved
-// fresh key so the funds are un-stranded and the "pending" row resolves.
-//
-// Safe by construction: the input note was already consumed by the settled
-// withdraw, so completing the swap cannot double-spend. Entries whose withdraw
-// never settled (fresh address empty) are left untouched — their input notes are
-// still unspent and safe in the pool.
-let resumeInFlight = false
-async function resumeStrandedSwaps(
-  connection: Connection,
-  shieldedAddress: string
-): Promise<number> {
-  if (resumeInFlight) return 0
-  resumeInFlight = true
-  let recovered = 0
-  try {
-    const outputs = await listSwapOutputs()
-    for (const o of outputs) {
-      if (o.swapSignature) continue // already completed
-      if (Date.now() - o.createdAt < RESUME_GRACE_MS) continue // may be in flight
-      try {
-        const bal = await connection.getBalance(new PublicKey(o.freshAddress))
-        if (bal <= RESUME_MIN_LAMPORTS) continue // never funded → input note safe
-        const r = await resumeSwapAtFreshAddress(
-          connection,
-          shieldedAddress,
-          o.freshSecretKeyHex,
-          o.outputMint,
-          o.reshield ?? false,
-          (note) => persistReshieldedNote(shieldedAddress, note)
-        )
-        await saveSwapOutput({
-          ...o,
-          outAmount: r.outAmount,
-          swapSignature: r.swapSignature
-        })
-        if (r.reshielded) {
-          await persistReshieldedNote(shieldedAddress, r.reshielded)
-        }
-        recovered++
-        console.log(`[paraloom] resumed stranded swap at ${o.freshAddress}`)
-      } catch (e) {
-        console.log(
-          `[paraloom] could not resume swap at ${o.freshAddress}: ${
-            e instanceof Error ? e.message : String(e)
-          }`
-        )
-      }
-    }
-  } finally {
-    resumeInFlight = false
-  }
-  return recovered
-}
-
 // The actual spend. Runs only after handlePrivateSwapRequest approved it.
 async function handlePrivateSwap(
   params: SwapRequestParams
@@ -866,7 +801,7 @@ async function handlePrivateSwap(
   // Before spending a new note, finish any earlier swap whose withdraw settled
   // but whose swap leg never ran, so stranded funds are recovered rather than
   // accumulating (and so a retry never abandons the previous attempt's SOL).
-  await resumeStrandedSwaps(connection, shieldedAddress).catch(() => 0)
+  await reconcileSwapOutputs(connection, shieldedAddress).catch(() => 0)
   await recoverReshields(connection, shieldedAddress).catch(() => 0)
 
   const candidates = (await getNotes(shieldedAddress)).filter(

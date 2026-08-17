@@ -43,3 +43,14 @@ export async function listSwapOutputs(): Promise<SwapOutput[]> {
   const stored = await chrome.storage.local.get(KEY)
   return (stored[KEY] as SwapOutput[]) ?? []
 }
+
+// Drop a swap row by its fresh address. Used to clear a stale "pending" row the
+// reconciler could not positively account for — the funds are already safe (the
+// swap either re-shielded into the pool or its input note was never spent), so
+// this only removes the misleading Activity entry, never any money.
+export async function dismissSwapOutput(freshAddress: string): Promise<void> {
+  const stored = await chrome.storage.local.get(KEY)
+  const current = (stored[KEY] as SwapOutput[]) ?? []
+  const next = current.filter((o) => o.freshAddress !== freshAddress)
+  await chrome.storage.local.set({ [KEY]: next })
+}
