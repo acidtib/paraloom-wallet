@@ -32,7 +32,10 @@ const ALLOWED_TYPES = new Set([
   "GET_ADDRESS",
   "GET_PUBLIC_ADDRESS",
   "GET_SHIELDED_BALANCE",
-  "IS_CONNECTED"
+  "GET_SHIELDED_TOKEN_BALANCES",
+  "IS_CONNECTED",
+  "REQUEST_UNLOCK",
+  "RESUME_SWAPS"
 ])
 
 window.addEventListener("message", (event: MessageEvent) => {
