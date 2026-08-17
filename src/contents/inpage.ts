@@ -132,6 +132,14 @@ if (!(window as any).paraloom) {
       const r = await relay("IS_CONNECTED")
       return r?.connected ?? false
     },
+    // Whether the connected wallet is currently locked (auto-locked after idle).
+    // The dapp uses this to show "locked, unlock to swap" instead of a
+    // misleading "ready" state while the origin stays approved. False when not
+    // connected.
+    isLocked: async () => {
+      const r = await relay("IS_CONNECTED")
+      return r?.locked ?? false
+    },
     // Finish any earlier private swap whose withdraw settled but whose swap leg
     // never completed (funds stranded at the fresh address). Safe to call on
     // connect; resolves to the number recovered (0 if nothing to do).

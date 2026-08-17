@@ -277,9 +277,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === "IS_CONNECTED") {
     // Per-sender, not the global flag: an unapproved page must not learn that
     // some other origin has a live connection (a fingerprinting signal).
+    // `connected` is origin-approval (persisted, survives an auto-lock);
+    // `locked` reports whether the wallet currently has NO decrypted session,
+    // so the dapp can show "locked, unlock to swap" instead of a misleading
+    // "ready" — and never surprise the user with an unlock prompt mid-swap.
     isAuthorizedSender(sender)
-      .then((connected) => sendResponse({ connected }))
-      .catch(() => sendResponse({ connected: false }))
+      .then(async (connected) => {
+        const locked = connected ? !(await loadSession()) : false
+        sendResponse({ connected, locked })
+      })
+      .catch(() => sendResponse({ connected: false, locked: false }))
     return true
   }
 
