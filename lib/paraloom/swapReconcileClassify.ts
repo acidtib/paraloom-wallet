@@ -10,6 +10,18 @@ export const RESUME_GRACE_MS = 120_000
 // overhead reserve in privateSwap.
 export const RESUME_MIN_LAMPORTS = 6_000_000n
 
+/** Wrapped-SOL mint. The swaps app sends this as `outputMint` for a SOL output
+ *  (not the literal "SOL"), and Jupiter unwraps it to native SOL on the way out.
+ *  Both spellings must count as native SOL so a token->SOL round trip re-shields
+ *  a native note (and displays as SOL) instead of mis-handling it as an SPL. */
+export const WSOL_MINT = "So11111111111111111111111111111111111111112"
+
+/** True when `outputMint` denotes native SOL (the literal "SOL" or the wrapped
+ *  mint). Kept here (no heavy imports) so it is unit-testable. */
+export function isNativeSolOutput(mint: string): boolean {
+  return mint === "SOL" || mint === WSOL_MINT
+}
+
 export type StrandAction = "skip" | "resume" | "landed" | "unresolved"
 
 /// Decide what to do with a stranded swap row from its on-chain footprint.

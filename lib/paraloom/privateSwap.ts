@@ -32,6 +32,9 @@ import type { ShieldedNote } from "./notes"
 import { saveSwapOutput } from "./swapOutputs"
 import { depositV3, spendV3 } from "./transactFlow"
 
+import { WSOL_MINT, isNativeSolOutput } from "./swapReconcileClassify"
+export { WSOL_MINT, isNativeSolOutput }
+
 /** Lamports left at the fresh address to cover the swap's own costs: the output
  *  token ATA rent (~0.00204), the fresh account's rent-exempt floor (~0.00089),
  *  and the swap tx + priority fees. The swap trades the funded balance minus
@@ -386,7 +389,7 @@ export async function privateSwap(
   //    is best-effort — any failure leaves a private buy rather than stranding
   //    funds. Skipped for a "SOL" output (re-shielding native SOL is pointless).
   let reshielded: ReshieldedNote | undefined
-  if (params.reshield && params.outputMint !== "SOL") {
+  if (params.reshield && !isNativeSolOutput(params.outputMint)) {
     reshielded = await reshieldToken(
       connection,
       fresh,
@@ -555,7 +558,7 @@ export async function privateSwapFromToken(
   //    itself). Best-effort: on failure the output stays at the fresh address as
   //    a private buy, recoverable with its saved key.
   let reshielded: ReshieldedNote | undefined
-  if (params.reshield && params.outputMint === "SOL") {
+  if (params.reshield && isNativeSolOutput(params.outputMint)) {
     try {
       const solBal = BigInt(await connection.getBalance(fresh.publicKey))
       const reshieldLamports = solBal - RESHIELD_FEE_RESERVE
@@ -571,7 +574,7 @@ export async function privateSwapFromToken(
     } catch {
       // leave the swapped SOL as a private buy at the fresh address
     }
-  } else if (params.reshield && params.outputMint !== "SOL") {
+  } else if (params.reshield) {
     reshielded = await reshieldToken(
       connection,
       fresh,

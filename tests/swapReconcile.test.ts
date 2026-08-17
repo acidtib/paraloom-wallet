@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest"
 
 import {
   classifyStrand,
+  isNativeSolOutput,
   RESUME_GRACE_MS,
-  RESUME_MIN_LAMPORTS
+  RESUME_MIN_LAMPORTS,
+  WSOL_MINT
 } from "../lib/paraloom/swapReconcileClassify"
 
 const OLD = RESUME_GRACE_MS + 1
@@ -86,5 +88,19 @@ describe("classifyStrand", () => {
         tokenAmount: 0n
       })
     ).toBe("unresolved")
+  })
+})
+
+describe("isNativeSolOutput", () => {
+  it("treats the wrapped-SOL mint as native SOL (the app sends this, not 'SOL')", () => {
+    expect(isNativeSolOutput(WSOL_MINT)).toBe(true)
+  })
+
+  it("treats the literal 'SOL' as native SOL", () => {
+    expect(isNativeSolOutput("SOL")).toBe(true)
+  })
+
+  it("treats USDC (any SPL mint) as NOT native SOL", () => {
+    expect(isNativeSolOutput("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")).toBe(false)
   })
 })

@@ -20,7 +20,7 @@
 
 import { Connection, PublicKey } from "@solana/web3.js"
 
-import { resumeSwapAtFreshAddress } from "./privateSwap"
+import { isNativeSolOutput, resumeSwapAtFreshAddress } from "./privateSwap"
 import { persistReshieldedNote } from "./reshieldRecovery"
 import {
   classifyStrand,
@@ -60,7 +60,7 @@ export async function reconcileSwapOutputs(
       }
 
       let tokenAmount = 0n
-      if (solLamports <= RESUME_MIN_LAMPORTS && o.outputMint !== "SOL") {
+      if (solLamports <= RESUME_MIN_LAMPORTS && !isNativeSolOutput(o.outputMint)) {
         try {
           const accts = await connection.getParsedTokenAccountsByOwner(freshPub, {
             mint: new PublicKey(o.outputMint)
@@ -90,7 +90,7 @@ export async function reconcileSwapOutputs(
       // leg): the SOL at the fresh address is the OUTPUT, never a SOL input to
       // swap again, so never resume it (that would route SOL -> SOL). Record the
       // SOL as landed instead; it is real and recoverable with the saved key.
-      if (action === "resume" && o.outputMint === "SOL") {
+      if (action === "resume" && isNativeSolOutput(o.outputMint)) {
         action = "landed"
         tokenAmount = solLamports
       }

@@ -827,6 +827,9 @@ export function Home({ onLock }: HomeProps) {
                 (n) => n.source === "deposit" && Number(n.amount) > 0
               )
               const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+              // Wrapped-SOL mint: the swaps app sends this as the outputMint for a
+              // SOL output, so a token->SOL buy must be shown (and scaled) as SOL.
+              const WSOL_MINT = "So11111111111111111111111111111111111111112"
 
               if (deposits.length === 0 && swapOutputs.length === 0) {
                 return (
@@ -872,13 +875,14 @@ export function Home({ onLock }: HomeProps) {
                           if (e.kind === "buy") {
                             const s = e.s
                             const done = s.outAmount > 0 && !!s.swapSignature
-                            const sym =
-                              s.outputMint === "SOL"
-                                ? "SOL"
-                                : s.outputMint === USDC_MINT
-                                  ? "USDC"
-                                  : "token"
-                            const outDiv = s.outputMint === "SOL" ? 1e9 : 1e6
+                            const isSolOut =
+                              s.outputMint === "SOL" || s.outputMint === WSOL_MINT
+                            const sym = isSolOut
+                              ? "SOL"
+                              : s.outputMint === USDC_MINT
+                                ? "USDC"
+                                : "token"
+                            const outDiv = isSolOut ? 1e9 : 1e6
                             return (
                               <div
                                 key={s.freshAddress || `buy-${i}`}
