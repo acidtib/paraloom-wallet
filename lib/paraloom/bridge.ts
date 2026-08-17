@@ -295,16 +295,24 @@ export async function confirmBySignatureStatus(
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    const st = await connection.getSignatureStatus(signature, {
-      searchTransactionHistory: true
-    })
-    const v = st.value
-    if (v) {
-      if (v.err) {
-        throw new Error(`transaction failed on-chain: ${JSON.stringify(v.err)}`)
+    try {
+      const st = await connection.getSignatureStatus(signature, {
+        searchTransactionHistory: true
+      })
+      const v = st.value
+      if (v) {
+        if (v.err) {
+          throw new Error(`transaction failed on-chain: ${JSON.stringify(v.err)}`)
+        }
+        if (v.confirmationStatus === "confirmed" || v.confirmationStatus === "finalized") {
+          return true
+        }
       }
-      if (v.confirmationStatus === "confirmed" || v.confirmationStatus === "finalized") {
-        return true
+    } catch (e) {
+      // A real on-chain failure must still surface; a transient RPC blip must
+      // not — keep polling until the deadline in that case.
+      if (e instanceof Error && e.message.startsWith("transaction failed on-chain")) {
+        throw e
       }
     }
     await new Promise((r) => setTimeout(r, 2000))
@@ -324,26 +332,32 @@ export async function createTokenAccount(
   tokenProgram: PublicKey = new PublicKey(TOKEN_PROGRAM_ID)
 ): Promise<PublicKey> {
   const ata = associatedTokenAddress(owner, mint, tokenProgram)
-  // Already there (e.g. a resumed swap, or a late-confirmed prior attempt)? Done.
-  if (await connection.getAccountInfo(ata, "confirmed")) return ata
-
-  const ix = buildCreateAtaIdempotentInstruction(payer.publicKey, owner, mint, tokenProgram)
-  const tx = new Transaction().add(ix)
-  const { blockhash } = await connection.getLatestBlockhash("confirmed")
-  tx.recentBlockhash = blockhash
-  tx.feePayer = payer.publicKey
-  tx.sign(payer)
-  const sig = await connection.sendRawTransaction(tx.serialize(), { maxRetries: 5 })
-  const confirmed = await confirmBySignatureStatus(connection, sig)
-  if (!confirmed) {
-    // Fell past the confirm window on a busy mainnet. CreateIdempotent is safe to
-    // treat as done if the account now exists — the tx may simply have confirmed
-    // late. Only fail if it truly is not there.
-    if (!(await connection.getAccountInfo(ata, "confirmed"))) {
-      throw new Error("ATA creation did not confirm in time")
+  // Re-submit up to 3 times with a fresh blockhash. CreateIdempotent is safe to
+  // repeat, so a dropped tx or a confirm that was missed during a transient RPC
+  // blip is simply retried, and the account's existence — not the confirm
+  // result — is the source of truth (a late-confirmed tx still counts).
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (await connection.getAccountInfo(ata, "confirmed")) return ata
+    try {
+      const ix = buildCreateAtaIdempotentInstruction(
+        payer.publicKey,
+        owner,
+        mint,
+        tokenProgram
+      )
+      const tx = new Transaction().add(ix)
+      const { blockhash } = await connection.getLatestBlockhash("confirmed")
+      tx.recentBlockhash = blockhash
+      tx.feePayer = payer.publicKey
+      tx.sign(payer)
+      const sig = await connection.sendRawTransaction(tx.serialize(), { maxRetries: 5 })
+      if (await confirmBySignatureStatus(connection, sig)) return ata
+    } catch {
+      // dropped / transient — the loop re-checks existence and re-submits
     }
   }
-  return ata
+  if (await connection.getAccountInfo(ata, "confirmed")) return ata
+  throw new Error("ATA creation did not confirm after retries")
 }
 
 function hexToBytes(hex: string): Uint8Array {
