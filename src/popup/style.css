@@ -1300,7 +1300,10 @@ textarea.input {
 }
 .detail-btn:hover { filter: brightness(1.08); }
 .detail-btn.ghost { background: var(--plm-bg-elevated); color: var(--text-primary); border: 1px solid var(--plm-border-strong); }
+.detail-btn.danger { background: transparent; color: var(--plm-error); border: 1px solid rgba(239,68,68,.35); }
+.detail-btn.danger:hover { background: rgba(239,68,68,.10); filter: none; }
 .detail-btn:focus-visible { outline: 2px solid var(--plm-gold-light); outline-offset: 2px; }
+.detail-note { width: 100%; margin-top: 14px; font-size: 12px; line-height: 1.5; color: var(--text-tertiary); text-align: center; }
 
 /* ── Home: total + split + actions + assets ── */
 .home-total-label { text-align: center; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--text-tertiary); }

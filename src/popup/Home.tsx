@@ -20,8 +20,9 @@ import { transfer } from "~lib/paraloom/transfer"
 import { depositV3, spendV3 } from "~lib/paraloom/transactFlow"
 import { addressBoxPubHex } from "~lib/crypto/keyManagement"
 import { scanForNotes } from "~lib/paraloom/scan"
-import { listSwapOutputs, type SwapOutput } from "~lib/paraloom/swapOutputs"
+import { dismissSwapOutput, listSwapOutputs, type SwapOutput } from "~lib/paraloom/swapOutputs"
 import { recoverReshields } from "~lib/paraloom/reshieldRecovery"
+import { reconcileSwapOutputs } from "~lib/paraloom/swapReconcile"
 import { fetchPrices, SOL_MINT, type TokenPrice } from "~lib/paraloom/prices"
 import { QRCodeSVG } from "qrcode.react"
 
@@ -271,6 +272,22 @@ export function Home({ onLock }: HomeProps) {
     } catch {
       // best-effort — the reads below still show whatever is already local
     }
+    // Resolve stranded swap rows so Activity stops showing settled swaps as
+    // "Pending" forever. Private swaps are mainnet-only, so this always runs
+    // against the mainnet archival RPC regardless of the selected network. It
+    // finishes a swap whose leg never ran and records one that already landed;
+    // rows it cannot account for are left for the user to dismiss.
+    try {
+      const resolved = await reconcileSwapOutputs(
+        getConnection("mainnet-beta"),
+        wallet.shieldedAddress
+      )
+      if (resolved > 0) {
+        listSwapOutputs().then(setSwapOutputs).catch(() => {})
+      }
+    } catch {
+      // best-effort
+    }
     try {
       setShieldedLamports(await shieldedBalance(wallet.shieldedAddress))
       setShieldedTokens(await shieldedTokenBalances(wallet.shieldedAddress))
@@ -284,6 +301,17 @@ export function Home({ onLock }: HomeProps) {
     loadBalances()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [wallet, network])
+
+  // Clear a stale "pending" swap row the reconciler could not account for. The
+  // funds are already safe (re-shielded into the pool, or the input note was
+  // never spent), so this only removes the misleading Activity entry.
+  async function dismissActivity() {
+    if (!activityDetail || activityDetail.kind !== "buy") return
+    const addr = activityDetail.address
+    await dismissSwapOutput(addr)
+    setSwapOutputs((prev) => prev.filter((o) => o.freshAddress !== addr))
+    setActivityDetail(null)
+  }
 
   // USD prices for the held assets (SOL is always priced). Refetch when the set
   // of shielded tokens changes; a failed fetch just leaves amounts un-valued.
@@ -1065,6 +1093,13 @@ export function Home({ onLock }: HomeProps) {
                     </div>
                   </div>
 
+                  {activityDetail.kind === "buy" && activityDetail.pending && (
+                    <p className="detail-note">
+                      Still pending after a while? Your funds are safe in your shielded
+                      balance. Dismissing only clears this row.
+                    </p>
+                  )}
+
                   <div className="detail-actions">
                     <a
                       className="detail-btn ghost"
@@ -1074,9 +1109,15 @@ export function Home({ onLock }: HomeProps) {
                     >
                       View on {activityDetail.kind === "buy" ? "Solscan" : "Explorer"}
                     </a>
-                    <button className="detail-btn" onClick={() => setActivityDetail(null)}>
-                      Close
-                    </button>
+                    {activityDetail.kind === "buy" && activityDetail.pending ? (
+                      <button className="detail-btn danger" onClick={dismissActivity}>
+                        Dismiss
+                      </button>
+                    ) : (
+                      <button className="detail-btn" onClick={() => setActivityDetail(null)}>
+                        Close
+                      </button>
+                    )}
                   </div>
                 </div>
               </div>,
