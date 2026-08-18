@@ -853,11 +853,14 @@ async function handlePrivateSwap(
 
   const connection = new Connection(PRIVATE_SWAP_RPC_URL, "confirmed")
 
-  // Before spending a new note, finish any earlier swap whose withdraw settled
-  // but whose swap leg never ran, so stranded funds are recovered rather than
-  // accumulating (and so a retry never abandons the previous attempt's SOL).
-  await reconcileSwapOutputs(connection, shieldedAddress).catch(() => 0)
-  await recoverReshields(connection, shieldedAddress).catch(() => 0)
+  // Recover earlier stranded swaps in the BACKGROUND, not on the critical path.
+  // Awaiting this made every swap wait on a full history + strand scan that
+  // grows over time (minutes, once the program history is large), before the
+  // gas withdraw was even submitted. It already runs on connect (resumeSwaps)
+  // and is guarded against double-runs; the new swap uses its own fresh address,
+  // so a concurrent background reconcile cannot conflict with it.
+  void reconcileSwapOutputs(connection, shieldedAddress).catch(() => 0)
+  void recoverReshields(connection, shieldedAddress).catch(() => 0)
 
   // Token-input swap (e.g. USDC -> SOL): spend a shielded SPL note and self-fund
   // gas from the user's own shielded SOL (Plan A′, full privacy).
