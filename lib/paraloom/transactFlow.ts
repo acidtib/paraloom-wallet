@@ -84,7 +84,12 @@ export async function depositV3(
 async function ensureLeafIndex(
   connection: Connection,
   note: ShieldedNote,
-  spendPrivkeyHex: string
+  spendPrivkeyHex: string,
+  // Leaves already rebuilt by the caller THIS instant (same tree snapshot), so
+  // spendV3 doesn't page the whole chain history again per input note. Only ever
+  // pass leaves fetched in the same spend — never a stale snapshot from a prior
+  // settlement, whose root may no longer be known on-chain.
+  cachedLeaves?: { commitmentHex: string }[]
 ): Promise<number> {
   if (note.leafIndex !== undefined && note.leafIndex >= 0) return note.leafIndex
   const pubkeyHex = await v3NotePubkey(spendPrivkeyHex)
@@ -95,7 +100,7 @@ async function ensureLeafIndex(
     note.assetId && note.assetId !== NATIVE_ASSET_HEX
       ? await v3NoteCommitmentAsset(BigInt(note.amount), pubkeyHex, note.blinding, note.assetId)
       : await v3NoteCommitment(BigInt(note.amount), pubkeyHex, note.blinding)
-  const leaves = await fetchV3Leaves(connection)
+  const leaves = cachedLeaves ?? (await fetchV3Leaves(connection))
   const idx = leaves.findIndex((l) => l.commitmentHex === commitment)
   if (idx < 0) throw new Error("note commitment not found in the on-chain tree")
   return idx
@@ -163,7 +168,9 @@ export async function spendV3(
   }[]
   let rootHex = ""
   for (const note of inputs) {
-    const leafIndex = await ensureLeafIndex(connection, note, spendPrivkeyHex)
+    // Reuse the leaves rebuilt just above (same snapshot) instead of paging the
+    // whole chain history again per input note.
+    const leafIndex = await ensureLeafIndex(connection, note, spendPrivkeyHex, leaves)
     const { path, root } = await v3MerklePath(leavesHex, leafIndex)
     rootHex = root
     inputSpecs.push({
