@@ -1622,7 +1622,9 @@ textarea.input {
 /* ─── Send Form ─── */
 .send-form { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
 .form-group { display: flex; flex-direction: column; gap: 6px; }
-.form-label { font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.3px; }
+.form-label { font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.3px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.label-max { font-size: 11px; font-weight: 700; color: var(--plm-gold-light); background: rgba(212,160,23,.08); border: 1px solid rgba(212,160,23,.28); border-radius: 6px; padding: 2px 7px; cursor: pointer; text-transform: none; letter-spacing: 0; font-variant-numeric: tabular-nums; transition: background .15s ease; }
+.label-max:hover { background: rgba(212,160,23,.16); }
 
 .form-input {
   background: rgba(255, 255, 255, 0.02);

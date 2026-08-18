@@ -18,6 +18,7 @@ const SHIELDED_TOKEN_META: Record<string, { symbol: string; decimals: number }> 
 import { withdraw } from "~lib/paraloom/withdraw"
 import { transfer } from "~lib/paraloom/transfer"
 import { depositV3, spendV3 } from "~lib/paraloom/transactFlow"
+import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { addressBoxPubHex } from "~lib/crypto/keyManagement"
 import { scanForNotes } from "~lib/paraloom/scan"
 import { dismissSwapOutput, listSwapOutputs, type SwapOutput } from "~lib/paraloom/swapOutputs"
@@ -39,6 +40,44 @@ const AUTO_LOCK_OPTIONS: { value: number; label: string }[] = [
   { value: 240, label: "4 hours" }
 ]
 const DEFAULT_AUTO_LOCK_MINUTES = 60
+
+// Below this a native note costs more to withdraw (25 bps fee + tx fee) than it
+// is worth: it is dust. Hidden from the withdraw selection so the picker isn't
+// buried under worthless fillers, but still counted in the shielded total.
+const WITHDRAW_DUST_LAMPORTS = 1_000_000n // 0.001 SOL
+
+// Unspent native (non-token) notes worth withdrawing, largest first.
+function spendableSolNotes(all: ShieldedNote[]): ShieldedNote[] {
+  return all
+    .filter(
+      (n) =>
+        !n.spent &&
+        (!n.assetId || n.assetId === NATIVE_ASSET_HEX) &&
+        BigInt(n.amount) >= WITHDRAW_DUST_LAMPORTS
+    )
+    .sort((a, b) => {
+      const d = BigInt(b.amount) - BigInt(a.amount)
+      return d > 0n ? 1 : d < 0n ? -1 : 0
+    })
+}
+
+// Pick up to 2 spendable notes covering `lamports` (a transact spends 1–2 and
+// returns change). Null if 2 notes can't cover it.
+function selectSolWithdrawNotes(
+  all: ShieldedNote[],
+  lamports: bigint
+): ShieldedNote[] | null {
+  const sorted = spendableSolNotes(all)
+  const chosen: ShieldedNote[] = []
+  let sum = 0n
+  for (const n of sorted) {
+    chosen.push(n)
+    sum += BigInt(n.amount)
+    if (sum >= lamports) return chosen
+    if (chosen.length === 2) break
+  }
+  return null
+}
 
 interface Token {
   symbol: string
@@ -97,8 +136,8 @@ export function Home({ onLock }: HomeProps) {
   } | null>(null)
   const [showWithdrawModal, setShowWithdrawModal] = useState(false)
   const [withdrawAddress, setWithdrawAddress] = useState("")
+  const [withdrawAmount, setWithdrawAmount] = useState("")
   const [withdrawing, setWithdrawing] = useState(false)
-  const [selectedNoteSig, setSelectedNoteSig] = useState<string | null>(null)
   const [showTransferModal, setShowTransferModal] = useState(false)
   const [transferAddress, setTransferAddress] = useState("")
   const [transferAmount, setTransferAmount] = useState("")
@@ -368,10 +407,24 @@ export function Home({ onLock }: HomeProps) {
       showToast("Invalid Solana address", "error")
       return
     }
-    const unspent = notes.filter((n) => !n.spent)
-    const note = unspent.find((n) => n.signature === selectedNoteSig) ?? unspent[0]
-    if (!note) {
-      showToast("No shielded notes to withdraw", "error")
+    const amt = Number(withdrawAmount)
+    if (!amt || amt <= 0) {
+      showToast("Enter an amount to withdraw", "error")
+      return
+    }
+    const lamports = BigInt(Math.round(amt * 1e9))
+    // Pick up to 2 spendable notes covering the amount; the wallet returns the
+    // change as a new note, so the user withdraws a chosen amount instead of one
+    // whole note. A single withdraw settles at most 2 notes.
+    const inputs = selectSolWithdrawNotes(notes, lamports)
+    if (!inputs) {
+      const max = spendableSolNotes(notes)
+        .slice(0, 2)
+        .reduce((s, n) => s + BigInt(n.amount), 0n)
+      showToast(
+        `Max ${(Number(max) / 1e9).toFixed(4)} SOL per withdraw (2 notes); withdraw in parts`,
+        "error"
+      )
       return
     }
     setWithdrawing(true)
@@ -379,15 +432,15 @@ export function Home({ onLock }: HomeProps) {
       const conn = getConnection(network)
       const before = await getSolBalance(conn, targetBytes)
       // Circuit v3 (#350): a withdraw is a transact with ext_amount < 0; the
-      // proof binds the destination and the quorum settles it. spendV3 marks
-      // the input spent and books any change note.
+      // proof binds the destination and the quorum settles it. spendV3 marks the
+      // inputs spent and books any change note.
       const { requestId } = await spendV3(
         conn,
         wallet.shieldedAddress,
         Buffer.from(wallet.spendPrivkey).toString("hex"),
         addressBoxPubHex(wallet.shieldedAddress),
-        [note],
-        BigInt(note.amount),
+        inputs,
+        lamports,
         { kind: "withdraw", recipientSolanaHex: Buffer.from(targetBytes).toString("hex") }
       )
 
@@ -400,9 +453,10 @@ export function Home({ onLock }: HomeProps) {
         }
       }
       if (settled) {
-        showToast(`Withdrew ${(Number(note.amount) / 1e9).toFixed(4)} SOL to Solana`, "success")
+        showToast(`Withdrew ${amt.toFixed(4)} SOL to Solana`, "success")
         setShowWithdrawModal(false)
         setWithdrawAddress("")
+        setWithdrawAmount("")
         await loadBalances()
       } else {
         showToast(`Submitted (${requestId.slice(0, 14)}…); settlement pending`, "info")
@@ -1649,41 +1703,60 @@ export function Home({ onLock }: HomeProps) {
                 <div className="balance-info">Prefilled with your address — edit to send elsewhere</div>
               </div>
 
-              <div className="form-group">
-                <label className="form-label">Note to withdraw (each is withdrawn whole)</label>
-                <div className="note-picker">
-                  {notes.filter((n) => !n.spent).length === 0 ? (
-                    <div className="balance-info">No shielded notes — deposit first</div>
-                  ) : (
-                    notes
-                      .filter((n) => !n.spent)
-                      .map((n, i) => {
-                        const selected = (selectedNoteSig ?? notes.filter((x) => !x.spent)[0]?.signature) === n.signature
-                        return (
-                          <div
-                            key={n.signature}
-                            className={`note-option ${selected ? "selected" : ""}`}
-                            onClick={() => setSelectedNoteSig(n.signature)}
-                          >
-                            <span className="note-option-amount">{(Number(n.amount) / 1e9).toFixed(4)} SOL</span>
-                            <span className="note-option-date">{timeAgo(n.createdAt)}</span>
-                          </div>
-                        )
-                      })
-                  )}
-                </div>
-                <div className="balance-info">
-                  Shielded total: {(Number(shieldedLamports) / 1e9).toFixed(4)} SOL across{" "}
-                  {notes.filter((n) => !n.spent).length} note(s)
-                </div>
-              </div>
+              {(() => {
+                const spend = spendableSolNotes(notes)
+                const spendSum = spend.reduce((s, n) => s + BigInt(n.amount), 0n)
+                const maxOne = spend.slice(0, 2).reduce((s, n) => s + BigInt(n.amount), 0n)
+                const allSol = notes.filter(
+                  (n) => !n.spent && (!n.assetId || n.assetId === NATIVE_ASSET_HEX)
+                )
+                const dustCount = allSol.length - spend.length
+                const dustSum =
+                  allSol.reduce((s, n) => s + BigInt(n.amount), 0n) - spendSum
+                return (
+                  <div className="form-group">
+                    <label className="form-label">
+                      Amount to withdraw
+                      {maxOne > 0n && (
+                        <button
+                          type="button"
+                          className="label-max"
+                          onClick={() => setWithdrawAmount(String(Number(maxOne) / 1e9))}
+                        >
+                          Max {(Number(maxOne) / 1e9).toFixed(4)} SOL
+                        </button>
+                      )}
+                    </label>
+                    <input
+                      type="number"
+                      className="form-input"
+                      placeholder="0.0"
+                      value={withdrawAmount}
+                      onChange={(e) => setWithdrawAmount(e.target.value)}
+                    />
+                    <div className="balance-info">
+                      {spend.length === 0
+                        ? "No spendable notes — deposit first"
+                        : `Up to ${(Number(maxOne) / 1e9).toFixed(4)} SOL per withdraw (2 notes at a time)`}
+                      {dustCount > 0 &&
+                        ` · ${(Number(dustSum) / 1e9).toFixed(4)} SOL in ${dustCount} dust note(s) hidden`}
+                    </div>
+                  </div>
+                )
+              })()}
 
               <button
                 className="button send-button"
-                disabled={withdrawing || !withdrawAddress.trim() || !notes.some((n) => !n.spent)}
+                disabled={
+                  withdrawing ||
+                  !withdrawAddress.trim() ||
+                  !withdrawAmount ||
+                  Number(withdrawAmount) <= 0 ||
+                  spendableSolNotes(notes).length === 0
+                }
                 onClick={handleWithdraw}
               >
-                {withdrawing ? "Proving & settling…" : "Withdraw note"}
+                {withdrawing ? "Proving & settling…" : "Withdraw"}
               </button>
             </div>
           </div>
