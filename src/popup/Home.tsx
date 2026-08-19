@@ -20,6 +20,7 @@ import { transfer } from "~lib/paraloom/transfer"
 import { depositV3, spendV3 } from "~lib/paraloom/transactFlow"
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { addressBoxPubHex } from "~lib/crypto/keyManagement"
+import { isValidShieldedAddress } from "~lib/crypto/addressChecksum"
 import { scanForNotes } from "~lib/paraloom/scan"
 import { dismissSwapOutput, listSwapOutputs, type SwapOutput } from "~lib/paraloom/swapOutputs"
 import { recoverReshields } from "~lib/paraloom/reshieldRecovery"
@@ -471,12 +472,12 @@ export function Home({ onLock }: HomeProps) {
   async function handleTransfer() {
     if (!wallet) return
     const to = transferAddress.trim()
-    // A v2 shielded address is `paraloom1` + box(64 hex) + spend(64 hex). Validate
-    // the full shape, not just the prefix: a malformed address that only passed
-    // the prefix check would spend into an undecryptable note and strand the
-    // funds (paraloom-core#770).
-    const body = to.startsWith("paraloom1") ? to.slice("paraloom1".length) : ""
-    if (body.length !== 128 || !/^[0-9a-fA-F]+$/.test(body)) {
+    // A v2 shielded address is `paraloom1` + box(64 hex) + spend(64 hex) + an
+    // 8-hex checksum. Validate the checksum, not just the length: without it a
+    // length-preserving typo (one wrong character, or two swapped) would spend
+    // into an address that decrypts to nothing spendable and strand the funds
+    // with no recovery (paraloom-core#781, #770).
+    if (!isValidShieldedAddress(to)) {
       showToast("Enter a valid paraloom1… shielded address", "error")
       return
     }
