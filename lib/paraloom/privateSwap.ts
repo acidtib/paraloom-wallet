@@ -322,8 +322,12 @@ export async function privateSwap(
     createdAt: Date.now()
   })
 
-  // 2. Withdraw the note value to the fresh address via the 2-of-2 quorum.
-  const { requestId } = await spendV3(
+  // 2. Withdraw the note value to the fresh address via the 2-of-2 quorum. The
+  //    input notes are marked spent only once this settles (the fresh address is
+  //    funded); on a settlement timeout they stay spendable so the swap can be
+  //    retried without stranding them (paraloom-core#792).
+  let funded = 0n
+  const { requestId, settled } = await spendV3(
     connection,
     shieldedAddress,
     spendPrivkeyHex,
@@ -331,11 +335,23 @@ export async function privateSwap(
     inputs,
     params.amountLamports,
     { kind: "withdraw", recipientSolanaHex: freshHex },
-    ingressToken
+    {
+      ingressToken,
+      confirmSettled: async () => {
+        try {
+          funded = await waitForFunding(connection, fresh.publicKey)
+          return true
+        } catch {
+          return false
+        }
+      }
+    }
   )
-
-  // 3. Wait for settlement — the fresh address gets `amount - protocol fee`.
-  const funded = await waitForFunding(connection, fresh.publicKey)
+  if (!settled) {
+    throw new Error(
+      "withdraw did not settle in time; the spent notes remain spendable, reopen the wallet to retry the swap"
+    )
+  }
 
   // 4. Swap the funded balance minus the on-chain-cost reserve. Reading the
   //    real balance (not the requested amount) keeps the swap within what
@@ -495,8 +511,10 @@ export async function privateSwapFromToken(
     createdAt: Date.now()
   })
 
-  // 1. Self-fund gas from the user's own shielded SOL (native withdraw).
-  await spendV3(
+  // 1. Self-fund gas from the user's own shielded SOL (native withdraw). The gas
+  //    notes are marked spent only once the fresh address is funded; a timeout
+  //    leaves them spendable to retry (paraloom-core#792).
+  const gas = await spendV3(
     connection,
     shieldedAddress,
     spendPrivkeyHex,
@@ -504,18 +522,34 @@ export async function privateSwapFromToken(
     gasInputs,
     GAS_LAMPORTS,
     { kind: "withdraw", recipientSolanaHex: freshHex },
-    ingressToken
+    {
+      ingressToken,
+      confirmSettled: async () => {
+        try {
+          await waitForFunding(connection, fresh.publicKey)
+          return true
+        } catch {
+          return false
+        }
+      }
+    }
   )
-  await waitForFunding(connection, fresh.publicKey)
+  if (!gas.settled) {
+    throw new Error(
+      "gas withdraw did not settle in time; the spent notes remain spendable, reopen the wallet to retry"
+    )
+  }
 
   // 2. Create the input-mint ATA at the fresh address (paid from the gas SOL).
   //    The on-chain transact_spl withdraw transfers into an EXISTING account.
   await createTokenAccount(connection, fresh, fresh.publicKey, inputMintPk)
 
   // 3. Withdraw the shielded token note(s) INTO that ATA — the circuit recipient
-  //    is the token account, not the wallet address.
+  //    is the token account, not the wallet address. The token notes are marked
+  //    spent only once the ATA is funded (paraloom-core#792).
   const ataHex = Buffer.from(ata.toBytes()).toString("hex")
-  const { requestId } = await spendV3(
+  let tokenLanded = 0n
+  const { requestId, settled } = await spendV3(
     connection,
     shieldedAddress,
     spendPrivkeyHex,
@@ -523,9 +557,23 @@ export async function privateSwapFromToken(
     tokenInputs,
     params.amountTokenUnits,
     { kind: "withdraw", recipientSolanaHex: ataHex },
-    ingressToken
+    {
+      ingressToken,
+      confirmSettled: async () => {
+        try {
+          tokenLanded = await waitForTokenFunding(connection, ata)
+          return true
+        } catch {
+          return false
+        }
+      }
+    }
   )
-  const tokenLanded = await waitForTokenFunding(connection, ata)
+  if (!settled) {
+    throw new Error(
+      "token withdraw did not settle in time; the spent notes remain spendable, reopen the wallet to retry"
+    )
+  }
 
   // 4. Route the ACTUAL landed token amount (net of the withdraw fee) into the
   //    output for the fresh address, then sign locally and submit.
