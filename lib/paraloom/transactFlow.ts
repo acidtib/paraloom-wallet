@@ -16,7 +16,12 @@ import {
 
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { encryptNote } from "./noteCrypto"
-import { addNote, markNoteSpentByIdentity, type ShieldedNote } from "./notes"
+import {
+  addNote,
+  markNoteSpentByIdentity,
+  setNoteLeafIndex,
+  type ShieldedNote
+} from "./notes"
 import { confirmCommitmentInTree } from "./settlementConfirm"
 import { fetchV3Leaves, sendDepositNote, submitTransact } from "./transact"
 
@@ -68,13 +73,38 @@ export async function depositV3(
   const blindingHex = randomHex32()
   const pubkeyHex = await v3NotePubkey(spendPrivkeyHex)
   const payer = Keypair.fromSecretKey(wallet.secretKey)
+  // The commitment is the note's stable identity, computed up front so the note
+  // can be persisted the instant the deposit is submitted and finalized by
+  // commitment once the leaf index is known.
+  const commitment = await v3NoteCommitment(lamports, pubkeyHex, blindingHex)
 
   const signature = await sendDepositNote(
     connection,
     payer,
     lamports,
     Uint8Array.from(Buffer.from(pubkeyHex, "hex")),
-    Uint8Array.from(Buffer.from(blindingHex, "hex"))
+    Uint8Array.from(Buffer.from(blindingHex, "hex")),
+    // Persist the note (with its blinding) the moment the deposit is submitted,
+    // BEFORE confirmation and the leaf-index lookup below. Previously the note
+    // was written only after that lookup — a getTransaction plus a possible
+    // full-history rebuild — so a worker eviction (a known MV3 failure mode) or
+    // a dropped RPC anywhere in that window left the deposit committed on-chain
+    // with its spend secret gone and unrecoverable (paraloom-core#791). Stored
+    // with the commitment but no leaf index yet; ensureLeafIndex can still locate
+    // the leaf by commitment, so the note is spendable even if the flow is
+    // interrupted right here.
+    async (sig) => {
+      await addNote(shieldedAddress, {
+        amount: lamports.toString(),
+        blinding: blindingHex,
+        assetId: NATIVE_ASSET_HEX,
+        signature: sig,
+        createdAt: Date.now(),
+        spent: false,
+        source: "deposit",
+        commitment
+      })
+    }
   )
 
   // Read our leaf index from the event this deposit emitted.
@@ -88,24 +118,19 @@ export async function depositV3(
   }
   if (leafIndex < 0) {
     // Fallback: locate our commitment in the rebuilt leaf list.
-    const commitment = await v3NoteCommitment(lamports, pubkeyHex, blindingHex)
     const leaves = await fetchV3Leaves(connection)
     leafIndex = leaves.findIndex((l) => l.commitmentHex === commitment)
   }
   if (leafIndex < 0) {
+    // The note is already persisted (above) and spendable — ensureLeafIndex will
+    // resolve the index by commitment at spend time — so surface the lookup miss
+    // without losing the deposit.
     throw new Error("deposit confirmed but leaf index not found")
   }
 
-  await addNote(shieldedAddress, {
-    amount: lamports.toString(),
-    blinding: blindingHex,
-    assetId: NATIVE_ASSET_HEX,
-    signature,
-    createdAt: Date.now(),
-    spent: false,
-    source: "deposit",
-    leafIndex
-  })
+  // Finalize the persisted note with its now-known leaf index, saving
+  // ensureLeafIndex a full-history rebuild at spend time.
+  await setNoteLeafIndex(shieldedAddress, commitment, leafIndex)
   return { signature, leafIndex }
 }
 

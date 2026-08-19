@@ -78,7 +78,13 @@ export async function sendDepositNote(
   payer: Keypair,
   amountLamports: bigint,
   pubkey: Uint8Array,
-  blinding: Uint8Array
+  blinding: Uint8Array,
+  // Called the instant the deposit is SUBMITTED (signature known), BEFORE the
+  // confirm wait. The blinding is fresh randomness that lives only here and in
+  // the on-chain instruction, so persisting the note now means a worker eviction
+  // or crash during confirmation can never orphan a landed deposit with its
+  // secret gone (paraloom-core#791). Mirrors depositSpl's on-submit persist.
+  onSubmitted?: (signature: string) => Promise<void>
 ): Promise<string> {
   const tx = new Transaction().add(
     depositNoteInstruction(payer.publicKey, amountLamports, pubkey, blinding)
@@ -93,6 +99,15 @@ export async function sendDepositNote(
   const signature = await connection.sendRawTransaction(tx.serialize(), {
     maxRetries: 5
   })
+  if (onSubmitted) {
+    // Persisting is best-effort and must not abort a submitted deposit; the note
+    // is still recoverable from the on-chain instruction data if this throws.
+    try {
+      await onSubmitted(signature)
+    } catch {
+      // swallow — confirmation proceeds regardless
+    }
+  }
   await confirmBySignatureStatus(connection, signature)
   return signature
 }

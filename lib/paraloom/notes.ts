@@ -82,6 +82,28 @@ export async function addDiscoveredNote(account: string, note: ShieldedNote): Pr
   await writeAll(all)
 }
 
+// Fill in a deposit note's on-chain leaf index once it is known. The note is
+// persisted at submit time (before the index can be resolved) so its blinding is
+// never orphaned (#791); this finalizes it by commitment. A no-op if the note is
+// gone. Only writes when the index actually changes, to avoid a redundant store.
+export async function setNoteLeafIndex(
+  account: string,
+  commitment: string,
+  leafIndex: number
+): Promise<void> {
+  const all = await readAll()
+  const notes = all[account] ?? []
+  let changed = false
+  all[account] = notes.map((n) => {
+    if (n.commitment === commitment && n.leafIndex !== leafIndex) {
+      changed = true
+      return { ...n, leafIndex }
+    }
+    return n
+  })
+  if (changed) await writeAll(all)
+}
+
 // Mark a note spent by its commitment (used for transfer inputs/outputs, which
 // are identified by commitment rather than a deposit signature).
 export async function markNoteSpentByCommitment(account: string, commitment: string): Promise<void> {
