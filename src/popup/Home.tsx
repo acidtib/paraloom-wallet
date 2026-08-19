@@ -434,25 +434,27 @@ export function Home({ onLock }: HomeProps) {
       const before = await getSolBalance(conn, targetBytes)
       // Circuit v3 (#350): a withdraw is a transact with ext_amount < 0; the
       // proof binds the destination and the quorum settles it. spendV3 marks the
-      // inputs spent and books any change note.
-      const { requestId } = await spendV3(
+      // inputs spent and books any change note ONLY once settlement is confirmed
+      // — the recipient balance rising above `before` — so a failed settlement
+      // never hides still-spendable funds (paraloom-core#792).
+      const { requestId, settled } = await spendV3(
         conn,
         wallet.shieldedAddress,
         Buffer.from(wallet.spendPrivkey).toString("hex"),
         addressBoxPubHex(wallet.shieldedAddress),
         inputs,
         lamports,
-        { kind: "withdraw", recipientSolanaHex: Buffer.from(targetBytes).toString("hex") }
-      )
-
-      let settled = false
-      for (let i = 0; i < 25; i++) {
-        await new Promise((r) => setTimeout(r, 2000))
-        if ((await getSolBalance(conn, targetBytes)) > before) {
-          settled = true
-          break
+        { kind: "withdraw", recipientSolanaHex: Buffer.from(targetBytes).toString("hex") },
+        {
+          confirmSettled: async () => {
+            for (let i = 0; i < 25; i++) {
+              await new Promise((r) => setTimeout(r, 2000))
+              if ((await getSolBalance(conn, targetBytes)) > before) return true
+            }
+            return false
+          }
         }
-      }
+      )
       if (settled) {
         showToast(`Withdrew ${amt.toFixed(4)} SOL to Solana`, "success")
         setShowWithdrawModal(false)
@@ -511,7 +513,12 @@ export function Home({ onLock }: HomeProps) {
 
     setTransferring(true)
     try {
-      const { requestId } = await spendV3(
+      // No external recipient balance to watch for a shielded transfer, so
+      // spendV3 confirms settlement by watching the output commitment land in the
+      // tree, and marks the inputs spent (and books change) only then — a failed
+      // settlement leaves the notes spendable instead of hiding them
+      // (paraloom-core#792).
+      const { requestId, settled } = await spendV3(
         getConnection(network),
         wallet.shieldedAddress,
         Buffer.from(wallet.spendPrivkey).toString("hex"),
@@ -520,7 +527,14 @@ export function Home({ onLock }: HomeProps) {
         amount,
         { kind: "transfer", recipientShielded: to }
       )
-      showToast(`Transfer submitted (${requestId.slice(0, 14)}…)`, "success")
+      if (settled) {
+        showToast(`Transfer settled (${requestId.slice(0, 14)}…)`, "success")
+      } else {
+        showToast(
+          `Submitted (${requestId.slice(0, 14)}…); settlement pending, notes stay spendable`,
+          "info"
+        )
+      }
       setShowTransferModal(false)
       setTransferAddress("")
       setTransferAmount("")

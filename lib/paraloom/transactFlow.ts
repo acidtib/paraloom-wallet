@@ -17,6 +17,7 @@ import {
 import { NATIVE_ASSET_HEX } from "~lib/prover"
 import { encryptNote } from "./noteCrypto"
 import { addNote, markNoteSpentByIdentity, type ShieldedNote } from "./notes"
+import { confirmCommitmentInTree } from "./settlementConfirm"
 import { fetchV3Leaves, sendDepositNote, submitTransact } from "./transact"
 
 function randomHex32(): string {
@@ -24,6 +25,35 @@ function randomHex32(): string {
   crypto.getRandomValues(b)
   b[31] &= 0x1f // stay well under the BN254 modulus
   return Buffer.from(b).toString("hex")
+}
+
+// How long spendV3 waits for a spend to actually settle on-chain before it gives
+// up and leaves the inputs unspent. Settlement is a 2-of-2 quorum co-sign plus an
+// on-chain transact, so seconds normally; the ceiling tolerates a slow quorum.
+const SETTLE_CONFIRM_TIMEOUT_MS = 150_000
+// fetchV3Leaves pages the whole program history, so poll it sparingly.
+const SETTLE_CONFIRM_POLL_MS = 6_000
+
+// Confirm a spend settled by watching for one of its output commitments to land
+// in the on-chain tree. Settlement is atomic — the transact instruction records
+// the input nullifiers and appends both output commitments together — so the
+// output commitment appearing is proof the nullifiers were consumed and the
+// inputs are truly spent. Used as the settlement signal for a shielded transfer,
+// which has no external recipient balance to watch (a withdraw's caller passes a
+// cheaper `confirmSettled` that polls the funded address instead). The polling
+// logic lives in settlementConfirm.ts so it can be unit-tested without the prover.
+function confirmSettledByTree(
+  connection: Connection,
+  commitmentHex: string,
+  timeoutMs = SETTLE_CONFIRM_TIMEOUT_MS,
+  pollMs = SETTLE_CONFIRM_POLL_MS
+): Promise<boolean> {
+  return confirmCommitmentInTree(
+    () => fetchV3Leaves(connection),
+    commitmentHex,
+    timeoutMs,
+    pollMs
+  )
 }
 
 /// Deposit lamports as a v3 note: the program computes the commitment and
@@ -110,6 +140,21 @@ export interface SpendResult {
   requestId: string
   /// Change returned to the wallet, if any (recorded as a new local note).
   changeLamports: bigint
+  /// Whether the spend was confirmed settled on-chain. When false, the inputs
+  /// were deliberately left unspent and no change note was booked, so the spend
+  /// can be retried safely (paraloom-core#792).
+  settled: boolean
+}
+
+export interface SpendOptions {
+  /// Bearer token for the transact ingress, when the endpoint gates submission.
+  ingressToken?: string
+  /// Settlement signal supplied by the caller: resolves true once the spend is
+  /// confirmed on-chain (e.g. the withdrawn funds landed at the recipient), or
+  /// false on timeout. A withdraw caller passes this to reuse the cheap
+  /// recipient-balance poll it already runs; when omitted (a shielded transfer),
+  /// spendV3 falls back to watching the output commitment land in the tree.
+  confirmSettled?: () => Promise<boolean>
 }
 
 /// Spend 1–2 notes through the unified transact:
@@ -127,7 +172,7 @@ export async function spendV3(
   dest:
     | { kind: "withdraw"; recipientSolanaHex: string }
     | { kind: "transfer"; recipientShielded: string },
-  ingressToken?: string
+  opts: SpendOptions = {}
 ): Promise<SpendResult> {
   if (inputs.length < 1 || inputs.length > 2) {
     throw new Error("transact spends 1 or 2 notes")
@@ -263,35 +308,55 @@ export async function spendV3(
     recipientHex,
     bundle,
     ciphertexts,
-    ingressToken,
+    opts.ingressToken,
     mintHex
   )
 
-  // Mark inputs spent and record the change note locally. Deliberately WITHOUT
-  // a leaf index: the index can only be predicted from a pre-settlement tree
-  // snapshot, and any deposit or transact that lands in the prove+ingress
-  // window shifts the real slot. A wrong index was persisted and then trusted
-  // forever by ensureLeafIndex, so the change output built a membership path to
-  // the wrong slot and became permanently unspendable. Storing only the
-  // commitment forces ensureLeafIndex to locate the note by commitment against
-  // a fresh rebuild at spend time, which is authoritative. (Deposit notes keep
-  // their index because it comes from the on-chain event and never moves.)
-  for (const note of inputs) {
-    await markNoteSpentByIdentity(shieldedAddress, note)
-  }
-  if (change > 0n) {
-    await addNote(shieldedAddress, {
-      amount: change.toString(),
-      blinding: changeBlind,
-      assetId: assetIdHex,
-      mint: isSpl ? inputs[0].mint : undefined,
-      signature: "",
-      createdAt: Date.now(),
-      spent: false,
-      source: "transfer",
-      commitment: await noteCommitment(change, ownPubHex, changeBlind)
-    })
+  // Wait until the spend actually settles before touching local bookkeeping.
+  // submitTransact only returns a queue ticket — the ingress accepts the request
+  // before the proof is verified and the quorum settles it, so a HTTP 200 is not
+  // a settlement. Marking the inputs spent (or booking the change) on acceptance
+  // meant that when settlement then failed, the wallet hid real, still-spendable
+  // funds as spent and showed a change note whose commitment never landed
+  // on-chain — corrupting the balance in both directions with no self-healing
+  // path (paraloom-core#792). The signal is the first output commitment landing
+  // in the tree; a withdraw caller supplies a cheaper recipient-funded check.
+  const settleCommitmentHex = await noteCommitment(
+    outputs[0].amount,
+    outputs[0].pubkeyHex,
+    outputs[0].blindingHex
+  )
+  const settled = opts.confirmSettled
+    ? await opts.confirmSettled()
+    : await confirmSettledByTree(connection, settleCommitmentHex)
+
+  if (settled) {
+    // Mark inputs spent and record the change note locally. Deliberately WITHOUT
+    // a leaf index: the index can only be predicted from a pre-settlement tree
+    // snapshot, and any deposit or transact that lands in the prove+ingress
+    // window shifts the real slot. A wrong index was persisted and then trusted
+    // forever by ensureLeafIndex, so the change output built a membership path to
+    // the wrong slot and became permanently unspendable. Storing only the
+    // commitment forces ensureLeafIndex to locate the note by commitment against
+    // a fresh rebuild at spend time, which is authoritative. (Deposit notes keep
+    // their index because it comes from the on-chain event and never moves.)
+    for (const note of inputs) {
+      await markNoteSpentByIdentity(shieldedAddress, note)
+    }
+    if (change > 0n) {
+      await addNote(shieldedAddress, {
+        amount: change.toString(),
+        blinding: changeBlind,
+        assetId: assetIdHex,
+        mint: isSpl ? inputs[0].mint : undefined,
+        signature: "",
+        createdAt: Date.now(),
+        spent: false,
+        source: "transfer",
+        commitment: await noteCommitment(change, ownPubHex, changeBlind)
+      })
+    }
   }
 
-  return { requestId, changeLamports: change }
+  return { requestId, changeLamports: change, settled }
 }
