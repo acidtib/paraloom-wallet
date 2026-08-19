@@ -69,6 +69,10 @@ export async function scanForNotes(
       commitment: d.output_commitment,
       source: "transfer"
     })
+    // Track it here too: the same commitment can appear twice in one response,
+    // and `known` is otherwise only a snapshot from before the loop, so the
+    // note would be stored once but counted twice.
+    known.add(d.output_commitment)
     found++
   }
   return found
