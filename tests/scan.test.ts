@@ -17,27 +17,67 @@
 // a mismatch drops the note — and not Poseidon itself. A test that the real
 // hash is correct would need the prover artifacts.
 
+import { PublicKey } from "@solana/web3.js"
 import { encryptNote } from "~lib/paraloom/noteCrypto"
-import { getNotes, markNoteSpentByIdentity, shieldedBalance } from "~lib/paraloom/notes"
+import {
+  getNotes,
+  markNoteSpentByIdentity,
+  shieldedBalance,
+  shieldedTokenBalances
+} from "~lib/paraloom/notes"
 import { scanForNotes } from "~lib/paraloom/scan"
 import * as nacl from "tweetnacl"
 import { beforeEach, describe, expect, it, vi } from "vitest"
 import { installFakeChrome } from "./support/chromeStorage"
 
-// Deterministic stand-in for the circuit hash. Depends on all three inputs, so
-// a note whose amount or blinding does not match its commitment is a mismatch
-// here for the same reason it would be under Poseidon.
-const fakeCommitment = (amount: bigint, pubkeyHex: string, blindingHex: string) =>
-  `c${amount.toString(16)}_${pubkeyHex.slice(0, 8)}_${blindingHex.slice(0, 8)}`
+// Deterministic stand-ins for the circuit hashes, in `vi.hoisted` so they exist
+// before the hoisted `vi.mock` factory runs. They depend on all of their
+// inputs, so a note whose amount, blinding or asset does not match its
+// commitment is a mismatch here for the same reason it would be under Poseidon.
+const {
+  assetIdForMint,
+  fakeAssetCommitment,
+  fakeCommitment,
+  fakeAssetIdForMint,
+  v3NoteCommitment,
+  v3NoteCommitmentAsset,
+  v3NotePubkey
+} = vi.hoisted(() => {
+  const fakeCommitment = (amount: bigint, pubkeyHex: string, blindingHex: string) =>
+    `c${amount.toString(16)}_${pubkeyHex.slice(0, 8)}_${blindingHex.slice(0, 8)}`
+  // A DIFFERENT function, not the native one with an extra argument, so a note
+  // verified with the wrong one never matches.
+  const fakeAssetCommitment = (
+    amount: bigint,
+    pubkeyHex: string,
+    blindingHex: string,
+    assetIdHex: string
+  ) => `${fakeCommitment(amount, pubkeyHex, blindingHex)}@${assetIdHex.slice(0, 8)}`
+  // `mint_to_asset` is one-way; this stand-in is too, and it keeps the 32-byte
+  // hex shape the note plaintext requires.
+  const fakeAssetIdForMint = (mintHex: string) =>
+    (mintHex.match(/../g) ?? [])
+      .map((b) => (parseInt(b, 16) ^ 0x5a).toString(16).padStart(2, "0"))
+      .join("")
 
-const v3NoteCommitment = vi.fn(async (amount: bigint, pubkeyHex: string, blindingHex: string) =>
-  fakeCommitment(amount, pubkeyHex, blindingHex)
-)
-const v3NotePubkey = vi.fn(async (privkeyHex: string) => `pub_${privkeyHex}`)
+  return {
+    fakeCommitment,
+    fakeAssetCommitment,
+    fakeAssetIdForMint,
+    v3NoteCommitment: vi.fn(async (a: bigint, p: string, b: string) => fakeCommitment(a, p, b)),
+    v3NoteCommitmentAsset: vi.fn(async (a: bigint, p: string, b: string, s: string) =>
+      fakeAssetCommitment(a, p, b, s)
+    ),
+    v3NotePubkey: vi.fn(async (privkeyHex: string) => `pub_${privkeyHex}`),
+    assetIdForMint: vi.fn(async (mintHex: string) => fakeAssetIdForMint(mintHex))
+  }
+})
 
 vi.mock("~lib/prover", () => ({
-  v3NoteCommitment: (a: bigint, p: string, b: string) => v3NoteCommitment(a, p, b),
-  v3NotePubkey: (p: string) => v3NotePubkey(p),
+  v3NoteCommitment,
+  v3NoteCommitmentAsset,
+  v3NotePubkey,
+  assetIdForMint,
   NATIVE_ASSET_HEX: "00".repeat(32)
 }))
 
@@ -113,6 +153,25 @@ function forSomeoneElse(amount: bigint) {
   }
 }
 
+// The wire carries hex and storage carries base58; keeping both spellings in
+// the test is the point, since conflating them is invisible until a spend.
+const MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+const MINT_HEX = new PublicKey(MINT).toBuffer().toString("hex")
+const MINT_ASSET = fakeAssetIdForMint(MINT_HEX)
+
+/** A received SPL note: asset-aware commitment, with the mint delivered beside it. */
+function splNote(amount: bigint, mint: string | null = MINT_HEX, assetIdHex = MINT_ASSET) {
+  return {
+    output_commitment: fakeAssetCommitment(amount, OUR_SPEND_PUB, BLINDING, assetIdHex),
+    mint,
+    ciphertext: encryptNote(hex(ourBox.publicKey), {
+      amount,
+      blindingHex: BLINDING,
+      assetIdHex
+    })
+  }
+}
+
 function respondWith(delivered: unknown[], ok = true, status = 200) {
   const fetchMock = vi.fn(async () => ({
     ok,
@@ -129,7 +188,9 @@ beforeEach(() => {
   installFakeChrome()
   ourBox = nacl.box.keyPair()
   v3NoteCommitment.mockClear()
+  v3NoteCommitmentAsset.mockClear()
   v3NotePubkey.mockClear()
+  assetIdForMint.mockClear()
 })
 
 describe("phantom note rejection (#196)", () => {
@@ -198,6 +259,98 @@ describe("phantom note rejection (#196)", () => {
   })
 })
 
+describe("received SPL notes (#23)", () => {
+  it("lands an SPL note in the token balances and not in the native one", async () => {
+    // The regression that would be silent in the way #196 was: a token balance
+    // counted as SOL is a wrong number the user acts on. `shieldedBalance`
+    // filters on `!n.mint`, so this only holds because the mint is stored.
+    respondWith([splNote(500n)])
+    expect(await scan()).toBe(1)
+
+    expect(await shieldedBalance(ACCOUNT)).toBe(0n)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [MINT]: 500n })
+  })
+
+  it("stores the mint as base58, not the hex it arrived as", async () => {
+    // `ShieldedNote.mint` is base58: the spend path feeds it to `new
+    // PublicKey`, and token metadata is keyed by it. Storing the wire form
+    // yields a note that can be discovered but never spent, and nothing before
+    // the spend would say so.
+    respondWith([splNote(500n)])
+    await scan()
+
+    const [note] = await getNotes(ACCOUNT)
+    expect(note.mint).toBe(MINT)
+    expect(note.mint).not.toBe(MINT_HEX)
+    expect(() => new PublicKey(note.mint!)).not.toThrow()
+  })
+
+  it("verifies an SPL note with the asset-aware hash", async () => {
+    // A native-only recomputation never matches an SPL leaf, which is what
+    // dropped every received token note before this.
+    respondWith([splNote(500n)])
+    await scan()
+
+    expect(v3NoteCommitmentAsset).toHaveBeenCalledWith(500n, OUR_SPEND_PUB, BLINDING, MINT_ASSET)
+    expect(v3NoteCommitment).not.toHaveBeenCalled()
+  })
+
+  it("drops an SPL note whose delivered mint does not hash to its assetId", async () => {
+    // The mint arrives from the node, so it is attacker-influenced exactly as
+    // `output_commitment` is. The note itself is genuine and its commitment
+    // verifies, so nothing downstream would catch a lie here — it would just
+    // file a real balance under the wrong token.
+    respondWith([{ ...splNote(500n), mint: "99".repeat(32) }])
+
+    expect(await scan()).toBe(0)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
+    expect(await shieldedBalance(ACCOUNT)).toBe(0n)
+  })
+
+  it.each([
+    [
+      "the field absent",
+      () => {
+        const { mint, ...rest } = splNote(500n)
+        return rest
+      }
+    ],
+    ["the field null", () => splNote(500n, null)]
+  ])("drops an SPL note delivered with no mint (%s)", async (_label, build) => {
+    // What a node that has not shipped #23 yet produces. Storing it mintless
+    // would put the tokens in the native balance, so dropping is both the safe
+    // answer and today's behaviour.
+    respondWith([build()])
+
+    expect(await scan()).toBe(0)
+    expect(await shieldedBalance(ACCOUNT)).toBe(0n)
+  })
+
+  it("accepts a native note whose mint field is null", async () => {
+    // A Rust `Option<String>` serializes None as null unless the field is also
+    // skipped, so `null` has to mean absent. Reading it as a contradiction
+    // would drop every native note against such a node.
+    respondWith([{ ...honest(100n), mint: null }])
+
+    expect(await scan()).toBe(1)
+    expect(await shieldedBalance(ACCOUNT)).toBe(100n)
+  })
+
+  it("drops a native note that arrives carrying a mint", async () => {
+    // The commitment binds the all-zero asset, so the mint contradicts it.
+    respondWith([{ ...honest(100n), mint: MINT }])
+    expect(await scan()).toBe(0)
+  })
+
+  it("keeps native and SPL notes on their own sides in one scan", async () => {
+    respondWith([honest(100n), splNote(500n)])
+    expect(await scan()).toBe(2)
+
+    expect(await shieldedBalance(ACCOUNT)).toBe(100n)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({ [MINT]: 500n })
+  })
+})
+
 describe("ordinary scanning", () => {
   it("stores a note that decrypts and verifies", async () => {
     respondWith([honest(4_200n)])
@@ -246,7 +399,10 @@ describe("ordinary scanning", () => {
   it("counts a note delivered twice in one response only once", async () => {
     // `known` is a snapshot from before the loop, so without adding each
     // stored commitment to it a repeated delivery is stored once and counted
-    // twice. The count is what the caller reports as "new notes found".
+    // twice. The node dedupes by (commitment, ciphertext), not by commitment
+    // alone, so one commitment with two ciphertexts is representable in a
+    // single response by construction — the wallet does not trust the node's
+    // `output_commitment`, and should not trust its de-duplication either.
     const note = honest(100n)
     respondWith([note, note])
 
