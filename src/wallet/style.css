@@ -153,7 +153,9 @@ body.sidepanel-mode .app {
   min-height: 0;
 }
 
-body.sidepanel-mode .wallet-layout {
+body.sidepanel-mode .wallet-layout,
+body.sidepanel-mode .unlock-layout,
+body.sidepanel-mode .loading {
   height: 100%;
 }
 
