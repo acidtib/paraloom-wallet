@@ -21,6 +21,7 @@ import {
 import { persistReshieldedNote, recoverReshields } from "~lib/paraloom/reshieldRecovery"
 import { reconcileSwapOutputs } from "~lib/paraloom/swapReconcile"
 import { assetIdForMint, NATIVE_ASSET_HEX } from "~lib/prover"
+import { openWalletWindow } from "~lib/extension/openWalletWindow"
 
 // Private swaps are mainnet-only (Jupiter liquidity) and rebuilding the v3 tree
 // needs an archival RPC, so the swap always runs against the node's archival
@@ -522,9 +523,6 @@ function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
   })
 }
 
-// Open the wallet UI in a popup window so the user can unlock to approve a
-// connection. chrome.action.openPopup() is unreliable in MV3, so we open the
-// popup page as its own window.
 // MV3 keep-alive. A connect/swap approval waits on the user (unlock + approve),
 // which can take longer than Chrome's ~30s idle eviction of the service worker.
 // If the worker is evicted mid-wait, the in-memory pending request AND the held
@@ -537,42 +535,6 @@ function withKeepAlive<T>(p: Promise<T>): Promise<T> {
     void chrome.runtime.getPlatformInfo().catch(() => {})
   }, 20_000)
   return p.finally(() => clearInterval(timer))
-}
-
-let openingWindow = false
-async function openWalletWindow() {
-  if (openingWindow) return
-  openingWindow = true
-  const WIDTH = 400
-  const HEIGHT = 620
-  try {
-    // Anchor the popup to the top-right of the focused browser window, like
-    // Phantom — otherwise Chrome drops it at the top-left of the screen.
-    let left: number | undefined
-    let top: number | undefined
-    try {
-      const win = await chrome.windows.getLastFocused()
-      if (typeof win.left === "number" && typeof win.width === "number") {
-        left = Math.max(0, win.left + win.width - WIDTH - 24)
-        top = (win.top ?? 0) + 24
-      }
-    } catch {
-      // Fall back to Chrome's default placement.
-    }
-    await chrome.windows.create({
-      url: chrome.runtime.getURL("popup.html"),
-      type: "popup",
-      width: WIDTH,
-      height: HEIGHT,
-      left,
-      top,
-      focused: true
-    })
-  } catch {
-    // Ignore — the user can still open the wallet manually from the toolbar.
-  } finally {
-    openingWindow = false
-  }
 }
 
 // Poll the lock state until the wallet is unlocked or the timeout elapses.
