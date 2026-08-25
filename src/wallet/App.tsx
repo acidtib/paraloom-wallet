@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react"
-import { getStoredWallet, isWalletLocked, setLockState } from "~lib/storage/secure"
+import { getStoredWallet, isWalletLocked, setLockState, STORAGE_KEY } from "~lib/storage/secure"
 import { loadSession } from "~lib/storage/session"
 import { useWalletStore } from "~lib/store/walletStore"
 import { ConnectApprove } from "~src/wallet/ConnectApprove"
@@ -38,6 +38,25 @@ export function App() {
     initWallet().catch(() => {
       void checkWalletState().catch(() => setLoading(false))
     })
+  }, [])
+
+  // The side panel stays mounted, so a lock flipped elsewhere won't be caught by the mount-time check alone.
+  useEffect(() => {
+    function onStorageChanged(changes: Record<string, chrome.storage.StorageChange>, area: string) {
+      if (area !== "local" || !changes[STORAGE_KEY]) return
+      const next = changes[STORAGE_KEY].newValue as { locked?: boolean } | undefined
+      const prev = changes[STORAGE_KEY].oldValue as { locked?: boolean } | undefined
+      if (typeof next?.locked !== "boolean" || next.locked === prev?.locked) return
+      if (next.locked) {
+        useWalletStore.getState().lock()
+        setLocked(true)
+      } else {
+        // Restore the session here too, not just flip the flag; Home reads wallet unconditionally.
+        void initWallet()
+      }
+    }
+    chrome.storage.onChanged.addListener(onStorageChanged)
+    return () => chrome.storage.onChanged.removeListener(onStorageChanged)
   }, [])
 
   async function initWallet() {
