@@ -204,8 +204,10 @@ export function Home({ onLock }: HomeProps) {
     }
 
     function refreshActiveTab() {
+      const windowId = currentWindowIdRef.current
+      if (windowId === null) return
       chrome.tabs
-        .query({ active: true, currentWindow: true })
+        .query({ active: true, windowId })
         .then(([tab]) => {
           if (tab?.id !== undefined && tab.windowId !== undefined) {
             activeTabRef.current = { tabId: tab.id, windowId: tab.windowId }
@@ -213,7 +215,13 @@ export function Home({ onLock }: HomeProps) {
         })
         .catch(() => {})
     }
-    refreshActiveTab()
+    chrome.windows
+      .getCurrent()
+      .then((win) => {
+        if (win.id !== undefined) currentWindowIdRef.current = win.id
+        refreshActiveTab()
+      })
+      .catch(() => {})
     chrome.tabs.onActivated.addListener(refreshActiveTab)
     return () => chrome.tabs.onActivated.removeListener(refreshActiveTab)
   }, [])
