@@ -161,6 +161,8 @@ export function Home({ onLock }: HomeProps) {
 
   // Settings state
   const [network, setNetworkState] = useState<"mainnet-beta" | "devnet">("mainnet-beta")
+  // Gates the balance fetch until getNetwork() resolves.
+  const [networkLoaded, setNetworkLoaded] = useState(false)
   const [autoLock, setAutoLock] = useState(DEFAULT_AUTO_LOCK_MINUTES)
   const [autoLockOpen, setAutoLockOpen] = useState(false)
   const [showPKModal, setShowPKModal] = useState(false)
@@ -183,7 +185,10 @@ export function Home({ onLock }: HomeProps) {
 
   // Load settings on mount
   useEffect(() => {
-    getNetwork().then(setNetworkState)
+    getNetwork().then((net) => {
+      setNetworkState(net)
+      setNetworkLoaded(true)
+    })
     getAutoLockMinutes().then(setAutoLock)
     getApprovedOrigins().then(setConnectedSites)
 
@@ -425,9 +430,10 @@ export function Home({ onLock }: HomeProps) {
   }
 
   useEffect(() => {
+    if (!networkLoaded) return
     loadBalances()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wallet, network])
+  }, [wallet, network, networkLoaded])
 
   // Clear a stale "pending" swap row the reconciler could not account for. The
   // funds are already safe (re-shielded into the pool, or the input note was
