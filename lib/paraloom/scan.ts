@@ -56,14 +56,24 @@ async function verifiedMint(
   if (mintHex == null) {
     return REJECT
   }
-  if ((await assetIdForMint(mintHex)) !== assetIdHex) {
-    return REJECT
-  }
   try {
+    if ((await assetIdForMint(mintHex)) !== assetIdHex) {
+      return REJECT
+    }
     return new PublicKey(Buffer.from(mintHex, "hex")).toBase58()
   } catch {
-    // A 32-byte value that is not a valid point still hashes to something, so
-    // the assetId check above can pass on one the spend path cannot use.
+    // Both calls have to be inside this, not just the decode. `assetIdForMint`
+    // reaches wasm `hex32`, which returns Err — a thrown JsValue — on anything
+    // that is not 32-byte hex, and the mint is node-supplied, so a malformed one
+    // is reachable. Uncaught it leaves `scanForNotes` entirely, and since
+    // `/transact/scan` serves the whole feed in arrival order, every note after
+    // the offending one goes undiscovered, native ones included. Both call sites
+    // swallow the throw, so nothing surfaces. A rejection drops one note; an
+    // escaping exception drops the rest of the feed.
+    //
+    // The decode is in here for its own reason too: a 32-byte value that is not
+    // a valid point still hashes to an assetId, so the check above can pass on a
+    // mint the spend path cannot use.
     return REJECT
   }
 }

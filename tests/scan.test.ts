@@ -69,7 +69,15 @@ const {
       fakeAssetCommitment(a, p, b, s)
     ),
     v3NotePubkey: vi.fn(async (privkeyHex: string) => `pub_${privkeyHex}`),
-    assetIdForMint: vi.fn(async (mintHex: string) => fakeAssetIdForMint(mintHex))
+    // Throws the way the real one does. `assetIdForMint` reaches wasm `hex32`,
+    // which returns Err — a thrown JsValue — rather than a wrong answer, and the
+    // mint it is handed comes from the node. A mock that quietly hashes anything
+    // cannot tell us what happens when a malformed one arrives.
+    assetIdForMint: vi.fn(async (mintHex: string) => {
+      if (!/^[0-9a-fA-F]*$/.test(mintHex.trim())) throw new Error("bad hex")
+      if (mintHex.trim().length !== 64) throw new Error("expected 32-byte hex")
+      return fakeAssetIdForMint(mintHex)
+    })
   }
 })
 
@@ -340,6 +348,30 @@ describe("received SPL notes (#23)", () => {
     // The commitment binds the all-zero asset, so the mint contradicts it.
     respondWith([{ ...honest(100n), mint: MINT }])
     expect(await scan()).toBe(0)
+  })
+
+  it.each([
+    ["non-hex", "not-a-mint-at-all"],
+    ["wrong length", "aabb"]
+  ])("drops an SPL note with a malformed mint (%s) instead of throwing", async (_l, mint) => {
+    // `assetIdForMint` throws on anything that is not 32-byte hex, so this has
+    // to be caught and turned into a rejection. Escaping, it would leave
+    // `scanForNotes` altogether.
+    respondWith([{ ...splNote(500n), mint }])
+
+    await expect(scan()).resolves.toBe(0)
+    expect(await shieldedTokenBalances(ACCOUNT)).toEqual({})
+  })
+
+  it("still finds a later note when an earlier one has a malformed mint", async () => {
+    // The one that matters. `/transact/scan` serves the whole feed in arrival
+    // order and the loop walks it, so a throw does not drop one note — it drops
+    // every note behind it, for every wallet, until the node restarts. Both call
+    // sites swallow the exception, so the loss is silent.
+    respondWith([{ ...splNote(500n), mint: "aabb" }, honest(100n)])
+
+    await expect(scan()).resolves.toBe(1)
+    expect(await shieldedBalance(ACCOUNT)).toBe(100n)
   })
 
   it("keeps native and SPL notes on their own sides in one scan", async () => {
