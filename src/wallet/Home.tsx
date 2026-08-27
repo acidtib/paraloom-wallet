@@ -262,10 +262,11 @@ export function Home({ onLock }: HomeProps) {
   }
 
   async function handleLock() {
+    // Swap to the lock screen before clearing the store, so this component never re-renders with wallet === null.
+    onLock()
     lock()
     await setLockState(true)
     await clearSession()
-    onLock()
   }
 
   function handleOpenSidePanel() {
