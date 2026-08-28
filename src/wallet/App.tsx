@@ -59,6 +59,18 @@ export function App() {
     return () => chrome.storage.onChanged.removeListener(onStorageChanged)
   }, [])
 
+  // A connection request can resolve in another surface (e.g. the floating
+  // approval window) while this one independently rendered the same request.
+  useEffect(() => {
+    function onMessage(message: { type?: string; id?: number }) {
+      if (message.type === "CONNECTION_RESOLVED") {
+        setPending((prev) => (prev?.id === message.id ? null : prev))
+      }
+    }
+    chrome.runtime.onMessage.addListener(onMessage)
+    return () => chrome.runtime.onMessage.removeListener(onMessage)
+  }, [])
+
   async function initWallet() {
     const wallet = await getStoredWallet()
 

@@ -630,21 +630,22 @@ function requestApproval(origin: string, timeoutMs: number): Promise<boolean> {
     const id = ++connectionIdCounter
     const clearPersisted = () =>
       void chrome.storage.session.remove("pendingConn").catch(() => {})
+    // Broadcast so another surface showing this same request can dismiss it too.
+    const settle = (approved: boolean) => {
+      pendingConnection = null
+      clearPersisted()
+      chrome.runtime.sendMessage({ type: "CONNECTION_RESOLVED", id }).catch(() => {})
+      resolve(approved)
+    }
     const timer = setTimeout(() => {
-      if (pendingConnection?.id === id) {
-        pendingConnection = null
-        clearPersisted()
-        resolve(false)
-      }
+      if (pendingConnection?.id === id) settle(false)
     }, timeoutMs)
     pendingConnection = {
       id,
       origin,
       resolve: (approved: boolean) => {
         clearTimeout(timer)
-        pendingConnection = null
-        clearPersisted()
-        resolve(approved)
+        settle(approved)
       }
     }
     // Persist so the pending approval survives an MV3 worker eviction during the
