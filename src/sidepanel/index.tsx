@@ -1,3 +1,5 @@
+// This entrypoint existing is what makes Plasmo add side_panel.default_path and the
+// "sidePanel" permission to the generated manifest, neither shows up in package.json
 import { useEffect } from "react"
 import { App } from "~src/wallet/App"
 

@@ -290,6 +290,9 @@ export function Home({ onLock }: HomeProps) {
     }
     chrome.runtime.sendMessage({ type: "SIDE_PANEL_OPENING", windowId }).catch(() => {})
     // Fired with no preceding await: sidePanel.open() needs a recent user gesture.
+    // Chrome only, on a gecko target Plasmo emits sidebar_action and chrome.sidePanel is
+    // undefined, so this throws synchronously and the .catch() below never sees it.
+    // Adding Firefox support will need a presence check or try/catch here, not another .catch()
     chrome.sidePanel
       .open({ windowId })
       .then(() => window.close())
